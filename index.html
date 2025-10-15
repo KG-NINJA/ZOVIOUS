@@ -1,0 +1,3188 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <title>Zovious Wireframe Shooter</title>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1"
+    />
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        background: #000;
+        overflow: hidden;
+        font-family: "IBM Plex Mono", monospace;
+        color: #d4f6ff;
+      }
+      #hud {
+        position: fixed;
+        top: 12px;
+        left: 16px;
+        font-size: 14px;
+        letter-spacing: 0.08em;
+        pointer-events: none;
+        text-shadow: 0 0 6px #66b3ff;
+      }
+      canvas {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="hud">SCORE 000000 | SHIELD ███ | #KGNINJA</div>
+    <script type="module">
+      // 日本語コメント: Three.jsを動的読み込みし、失敗時はフォールバックメッセージを表示する。
+      async function start() {
+        try {
+          const THREE = await import(
+            "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js"
+          );
+
+          const renderer = new THREE.WebGLRenderer({ antialias: true });
+          renderer.setPixelRatio(window.devicePixelRatio);
+          renderer.setSize(window.innerWidth, window.innerHeight);
+          renderer.setClearColor(0x000000, 1);
+          document.body.appendChild(renderer.domElement);
+
+          const scene = new THREE.Scene();
+          const camera = new THREE.PerspectiveCamera(
+            68,
+            window.innerWidth / window.innerHeight,
+            0.1,
+            200
+          );
+          camera.position.set(0, 6, 12);
+          camera.lookAt(0, 0, 0);
+          const visibilityVector = new THREE.Vector3();
+          const clipVector = new THREE.Vector3();
+          const tmpVec = new THREE.Vector3();
+          const tmpVec2 = new THREE.Vector3();
+          const velocityHelper = new THREE.Vector3();
+
+          // 日本語コメント: 効果音を管理するためのWeb Audio初期化ロジック。
+          let audioCtx = null;
+          let noiseBuffer = null;
+          let fortressHum = null;
+          let backgroundInterval = null;
+          let audioInitialized = false;
+          let backgroundDelayNode = null;
+          let backgroundFeedbackNode = null;
+          let backgroundWetGain = null;
+
+          function ensureAudioContext() {
+            if (!audioCtx) {
+              const Ctor = window.AudioContext || window.webkitAudioContext;
+              if (!Ctor) return null;
+              audioCtx = new Ctor();
+            }
+            return audioCtx;
+          }
+
+          function ensureAudioReady() {
+            const ctx = ensureAudioContext();
+            if (!ctx) return null;
+            if (ctx.state === "suspended") {
+              ctx.resume().catch(() => {});
+            }
+            return ctx;
+          }
+
+          function getNoiseBuffer(ctx) {
+            if (noiseBuffer) return noiseBuffer;
+            const length = Math.floor(ctx.sampleRate * 0.45);
+            const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < length; i++) {
+              const decay = 1 - i / length;
+              data[i] = (Math.random() * 2 - 1) * decay;
+            }
+            noiseBuffer = buffer;
+            return noiseBuffer;
+          }
+
+          // 日本語コメント: 自機ショットの高音レーザーを合成。
+          function playShotSound() {
+            const ctx = ensureAudioReady();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = "triangle";
+            osc.frequency.setValueAtTime(1500, now);
+            osc.frequency.exponentialRampToValueAtTime(900, now + 0.18);
+            gain.gain.setValueAtTime(0.0001, now);
+            gain.gain.exponentialRampToValueAtTime(0.26, now + 0.012);
+            gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.24);
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.start(now);
+            osc.stop(now + 0.25);
+          }
+
+          // 日本語コメント: ブラスター投下時の下降音を生成。
+          function playBombDropSound() {
+            const ctx = ensureAudioReady();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const filter = ctx.createBiquadFilter();
+            const gain = ctx.createGain();
+            osc.type = "sawtooth";
+            osc.frequency.setValueAtTime(580, now);
+            osc.frequency.exponentialRampToValueAtTime(180, now + 0.55);
+            filter.type = "lowpass";
+            filter.frequency.setValueAtTime(1600, now);
+            filter.frequency.exponentialRampToValueAtTime(420, now + 0.55);
+            gain.gain.setValueAtTime(0.0001, now);
+            gain.gain.exponentialRampToValueAtTime(0.32, now + 0.02);
+            gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.6);
+            osc.connect(filter);
+            filter.connect(gain);
+            gain.connect(ctx.destination);
+            osc.start(now);
+            osc.stop(now + 0.62);
+          }
+
+          // 日本語コメント: 爆発時のノイズサンプルを鳴らす。
+          function playExplosionSound() {
+            const ctx = ensureAudioReady();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const noise = ctx.createBufferSource();
+            noise.buffer = getNoiseBuffer(ctx);
+            const filter = ctx.createBiquadFilter();
+            filter.type = "lowpass";
+            filter.frequency.setValueAtTime(2000, now);
+            filter.frequency.exponentialRampToValueAtTime(280, now + 0.6);
+            const gain = ctx.createGain();
+            gain.gain.setValueAtTime(0.35, now);
+            gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.62);
+            noise.connect(filter);
+            filter.connect(gain);
+            gain.connect(ctx.destination);
+            noise.start(now);
+            noise.stop(now + 0.62);
+          }
+
+          // 日本語コメント: 空中物撃破時の軽快なチャイム音を鳴らす。
+          function playAirEnemyDestroySound() {
+            const ctx = ensureAudioReady();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const tones = [980, 1320, 1760];
+            tones.forEach((freq, index) => {
+              const start = now + index * 0.04;
+              const osc = ctx.createOscillator();
+              const gain = ctx.createGain();
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(freq, start);
+              gain.gain.setValueAtTime(0.0001, start);
+              gain.gain.exponentialRampToValueAtTime(0.22, start + 0.02);
+              gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.18);
+              osc.connect(gain);
+              gain.connect(ctx.destination);
+              if (backgroundDelayNode) {
+                gain.connect(backgroundDelayNode);
+              }
+              osc.start(start);
+              osc.stop(start + 0.2);
+            });
+          }
+
+          // 日本語コメント: モノリスに弾が当たった際の金属音を生成。
+          function playMetalClangSound() {
+            const ctx = ensureAudioReady();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            const noise = ctx.createBufferSource();
+            osc.type = "square";
+            osc.frequency.setValueAtTime(1180, now);
+            osc.frequency.exponentialRampToValueAtTime(720, now + 0.18);
+            gain.gain.setValueAtTime(0.0001, now);
+            gain.gain.exponentialRampToValueAtTime(0.3, now + 0.015);
+            gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.32);
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            if (backgroundDelayNode) {
+              gain.connect(backgroundDelayNode);
+            }
+            noise.buffer = getNoiseBuffer(ctx);
+            const noiseFilter = ctx.createBiquadFilter();
+            noiseFilter.type = "highpass";
+            noiseFilter.frequency.setValueAtTime(1600, now);
+            const noiseGain = ctx.createGain();
+            noiseGain.gain.setValueAtTime(0.12, now);
+            noiseGain.gain.linearRampToValueAtTime(0.0001, now + 0.24);
+            noise.connect(noiseFilter);
+            noiseFilter.connect(noiseGain);
+            noiseGain.connect(ctx.destination);
+            if (backgroundDelayNode) {
+              noiseGain.connect(backgroundDelayNode);
+            }
+            osc.start(now);
+            osc.stop(now + 0.35);
+            noise.start(now);
+            noise.stop(now + 0.26);
+          }
+
+          // 日本語コメント: BGM用の軽いディレイエコーを初期化。
+          function ensureBackgroundEcho(ctx) {
+            if (backgroundDelayNode && backgroundWetGain) return true;
+            try {
+              backgroundDelayNode = ctx.createDelay(1.2);
+              backgroundDelayNode.delayTime.setValueAtTime(0.36, ctx.currentTime);
+              backgroundFeedbackNode = ctx.createGain();
+              backgroundFeedbackNode.gain.setValueAtTime(0.45, ctx.currentTime);
+              backgroundWetGain = ctx.createGain();
+              backgroundWetGain.gain.setValueAtTime(0.32, ctx.currentTime);
+              backgroundDelayNode.connect(backgroundFeedbackNode);
+              backgroundFeedbackNode.connect(backgroundDelayNode);
+              backgroundDelayNode.connect(backgroundWetGain);
+              backgroundWetGain.connect(ctx.destination);
+              return true;
+            } catch (error) {
+              console.warn("Echo init failed", error);
+              backgroundDelayNode = null;
+              backgroundFeedbackNode = null;
+              backgroundWetGain = null;
+              return false;
+            }
+          }
+
+          // 日本語コメント: スタート時の自機ジングルを再生。
+          function playStartJingle() {
+            const ctx = ensureAudioReady();
+            if (!ctx) return;
+            ensureBackgroundEcho(ctx);
+            const now = ctx.currentTime;
+            const masterGain = ctx.createGain();
+            masterGain.gain.setValueAtTime(0.9, now);
+            masterGain.connect(ctx.destination);
+            if (backgroundDelayNode) {
+              masterGain.connect(backgroundDelayNode);
+            }
+
+            // 日本語コメント: コード進行を増やし、余韻を強めてジングルを延長する。
+            const chords = [
+              { freqs: [587.33, 880, 1318.51], dur: 0.36, overlap: 0.05, amp: 0.24 },
+              { freqs: [659.25, 987.77, 1480], dur: 0.34, overlap: 0.05, amp: 0.26 },
+              { freqs: [739.99, 1108.73, 1661.22], dur: 0.32, overlap: 0.04, amp: 0.25 },
+              { freqs: [880, 1320, 1760], dur: 0.48, overlap: 0.06, amp: 0.28 },
+              { freqs: [987.77, 1480, 1975.53], dur: 0.62, overlap: 0, amp: 0.22 },
+            ];
+
+            let offset = 0;
+            for (const chord of chords) {
+              chord.freqs.forEach((freq, idx) => {
+                const start = now + offset + idx * 0.008;
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.type =
+                  idx === 0 ? "triangle" : idx === chord.freqs.length - 1 ? "sine" : "sawtooth";
+                osc.frequency.setValueAtTime(freq, start);
+                osc.frequency.exponentialRampToValueAtTime(freq * 0.92, start + chord.dur * 0.8);
+                gain.gain.setValueAtTime(0.0001, start);
+                gain.gain.exponentialRampToValueAtTime(chord.amp, start + 0.035);
+                gain.gain.exponentialRampToValueAtTime(0.0001, start + chord.dur);
+                osc.connect(gain);
+                gain.connect(masterGain);
+                osc.start(start);
+                osc.stop(start + chord.dur + 0.2);
+              });
+              offset += chord.dur - chord.overlap;
+            }
+
+            // 日本語コメント: 最後にハイパスノイズを薄く混ぜてフレア感を追加。
+            const tailNoise = ctx.createBufferSource();
+            tailNoise.buffer = getNoiseBuffer(ctx);
+            const tailFilter = ctx.createBiquadFilter();
+            tailFilter.type = "highpass";
+            tailFilter.frequency.setValueAtTime(1400, now + offset);
+            const tailGain = ctx.createGain();
+            tailGain.gain.setValueAtTime(0.0001, now + offset);
+            tailGain.gain.exponentialRampToValueAtTime(0.08, now + offset + 0.06);
+            tailGain.gain.exponentialRampToValueAtTime(0.0001, now + offset + 0.6);
+            tailNoise.connect(tailFilter);
+            tailFilter.connect(tailGain);
+            tailGain.connect(masterGain);
+            tailNoise.start(now + offset - 0.02);
+            tailNoise.stop(now + offset + 0.7);
+          }
+
+          // 日本語コメント: ガムラン風アルペジオBGMを開始。
+          function startBackgroundArpeggio() {
+            const ctx = ensureAudioReady();
+            if (!ctx) return;
+            stopBackgroundArpeggio();
+            const pattern = [392, 523.25, 659.25, 784, 587.33, 440];
+            let index = 0;
+            const period = 260;
+            ensureBackgroundEcho(ctx);
+            backgroundInterval = window.setInterval(() => {
+              const freq = pattern[index % pattern.length];
+              index++;
+              const start = ctx.currentTime;
+              const osc = ctx.createOscillator();
+              const gain = ctx.createGain();
+              osc.type = "triangle";
+              osc.frequency.setValueAtTime(freq, start);
+              osc.frequency.linearRampToValueAtTime(freq * 1.015, start + 0.18);
+              const amplitude = index % 3 === 0 ? 0.14 : 0.1;
+              gain.gain.setValueAtTime(0.0001, start);
+              gain.gain.exponentialRampToValueAtTime(amplitude, start + 0.018);
+              gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.24);
+              osc.connect(gain);
+              gain.connect(ctx.destination);
+              if (backgroundDelayNode) {
+                gain.connect(backgroundDelayNode);
+              }
+              osc.start(start);
+              osc.stop(start + 0.26);
+            }, period);
+          }
+
+          function stopBackgroundArpeggio() {
+            if (backgroundInterval != null) {
+              window.clearInterval(backgroundInterval);
+              backgroundInterval = null;
+            }
+          }
+
+          // 日本語コメント: 自機が破壊された際の重低音爆発を再生。
+          function playPlayerDestructionSound() {
+            const ctx = ensureAudioReady();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const noise = ctx.createBufferSource();
+            noise.buffer = getNoiseBuffer(ctx);
+            const band = ctx.createBiquadFilter();
+            band.type = "bandpass";
+            band.frequency.setValueAtTime(900, now);
+            band.Q.setValueAtTime(0.9, now);
+            const noiseGain = ctx.createGain();
+            noiseGain.gain.setValueAtTime(0.0001, now);
+            noiseGain.gain.exponentialRampToValueAtTime(0.7, now + 0.024);
+            noiseGain.gain.exponentialRampToValueAtTime(0.0001, now + 1.1);
+            noise.connect(band);
+            band.connect(noiseGain);
+            noiseGain.connect(ctx.destination);
+
+            const sub = ctx.createOscillator();
+            sub.type = "sine";
+            sub.frequency.setValueAtTime(52, now);
+            const subGain = ctx.createGain();
+            subGain.gain.setValueAtTime(0.0001, now);
+            subGain.gain.exponentialRampToValueAtTime(0.5, now + 0.05);
+            subGain.gain.exponentialRampToValueAtTime(0.0001, now + 1.2);
+            sub.connect(subGain);
+            subGain.connect(ctx.destination);
+
+            noise.start(now);
+            noise.stop(now + 1.1);
+            sub.start(now);
+            sub.stop(now + 1.3);
+          }
+
+          // 日本語コメント: 浮遊要塞の駆動ハムを開始。
+          function startFortressHum() {
+            const ctx = ensureAudioReady();
+            if (!ctx) return;
+            stopFortressHum();
+            const now = ctx.currentTime;
+
+            const baseOsc = ctx.createOscillator();
+            baseOsc.type = "sawtooth";
+            baseOsc.frequency.setValueAtTime(70, now);
+            const baseFilter = ctx.createBiquadFilter();
+            baseFilter.type = "lowpass";
+            baseFilter.frequency.setValueAtTime(520, now);
+            baseFilter.Q.setValueAtTime(0.9, now);
+            const baseGain = ctx.createGain();
+            baseGain.gain.setValueAtTime(0.0001, now);
+            baseGain.gain.exponentialRampToValueAtTime(0.16, now + 1);
+
+            const lfo = ctx.createOscillator();
+            lfo.type = "sine";
+            lfo.frequency.setValueAtTime(0.45, now);
+            const lfoGain = ctx.createGain();
+            lfoGain.gain.setValueAtTime(0.05, now);
+            lfo.connect(lfoGain);
+            lfoGain.connect(baseGain.gain);
+
+            baseOsc.connect(baseFilter);
+            baseFilter.connect(baseGain);
+            baseGain.connect(ctx.destination);
+
+            const rumble = ctx.createOscillator();
+            rumble.type = "sine";
+            rumble.frequency.setValueAtTime(24, now);
+            const rumbleGain = ctx.createGain();
+            rumbleGain.gain.setValueAtTime(0.0001, now);
+            rumbleGain.gain.exponentialRampToValueAtTime(0.12, now + 1.2);
+            rumble.connect(rumbleGain);
+            rumbleGain.connect(ctx.destination);
+
+            baseOsc.start(now);
+            lfo.start(now);
+            rumble.start(now);
+
+            fortressHum = {
+              ctx,
+              sources: [baseOsc, lfo, rumble],
+              gains: [baseGain, rumbleGain],
+            };
+          }
+
+          // 日本語コメント: 要塞ハムをフェードアウトさせて停止。
+          function stopFortressHum() {
+            if (!fortressHum) return;
+            const { ctx, sources, gains } = fortressHum;
+            const now = ctx.currentTime;
+            for (const gain of gains) {
+              try {
+                gain.gain.cancelScheduledValues(now);
+                const current = Math.max(gain.gain.value, 0.0001);
+                gain.gain.setValueAtTime(current, now);
+                gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.5);
+              } catch (_) {}
+            }
+            for (const src of sources) {
+              try {
+                src.stop(now + 0.55);
+              } catch (_) {}
+            }
+            fortressHum = null;
+          }
+
+          // 日本語コメント: 初回操作でオーディオ再生制限を解除。
+          const audioUnlockEvents = ["pointerdown", "keydown"];
+          function installAudioUnlock() {
+            const unlock = () => {
+              const ctx = ensureAudioContext();
+              if (!ctx) return;
+              if (ctx.state === "suspended") {
+                ctx.resume().catch(() => {});
+              }
+              if (!audioInitialized) {
+                audioInitialized = true;
+                playStartJingle();
+                window.setTimeout(() => {
+                  startBackgroundArpeggio();
+                }, 1400);
+              }
+            };
+            for (const type of audioUnlockEvents) {
+              window.addEventListener(
+                type,
+                () => {
+                  unlock();
+                },
+                { once: true, passive: true }
+              );
+            }
+          }
+          installAudioUnlock();
+
+          // 日本語コメント: ベクタースキャン風の線描画マテリアルを共通化。
+          const lineMaterial = new THREE.LineBasicMaterial({
+            color: 0x66b3ff,
+            transparent: true,
+            opacity: 0.9,
+          });
+          const airMaterial = new THREE.LineBasicMaterial({
+            color: 0xa9ecff,
+            transparent: true,
+            opacity: 0.9,
+          });
+          const groundMaterial = new THREE.LineBasicMaterial({
+            color: 0xffc98a,
+            transparent: true,
+            opacity: 0.92,
+          });
+          // 日本語コメント: 各エリアの雰囲気に合わせたラインマテリアルを定義。
+          const forestMaterial = new THREE.LineBasicMaterial({
+            color: 0x7fffaf,
+            transparent: true,
+            opacity: 0.85,
+          });
+          const riverMaterial = new THREE.LineBasicMaterial({
+            color: 0x8fe7ff,
+            transparent: true,
+            opacity: 0.92,
+          });
+          const grassMaterial = new THREE.LineBasicMaterial({
+            color: 0xc6f7a6,
+            transparent: true,
+            opacity: 0.88,
+          });
+          const glyphMaterial = new THREE.LineBasicMaterial({
+            color: 0xfff2b3,
+            transparent: true,
+            opacity: 0.94,
+          });
+          const gateMaterial = new THREE.LineBasicMaterial({
+            color: 0xbba6ff,
+            transparent: true,
+            opacity: 0.9,
+          });
+          const scoutMaterial = new THREE.LineBasicMaterial({
+            color: 0xaee8ff,
+            transparent: true,
+            opacity: 0.9,
+          });
+          const fighterMaterial = new THREE.LineBasicMaterial({
+            color: 0xffbce6,
+            transparent: true,
+            opacity: 0.88,
+          });
+          const discMaterial = new THREE.LineBasicMaterial({
+            color: 0xe6fffb,
+            transparent: true,
+            opacity: 0.92,
+          });
+          const hoverTurretMaterial = new THREE.LineBasicMaterial({
+            color: 0xffe4c4,
+            transparent: true,
+            opacity: 0.9,
+          });
+          const monolithMaterial = new THREE.LineBasicMaterial({
+            color: 0xc9d7ff,
+            transparent: true,
+            opacity: 0.88,
+          });
+          const WORLD_SCROLL_SPEED = 10;
+
+          // 日本語コメント: 地面グリッドを永続的にスクロールさせる。
+          const grid = new THREE.GridHelper(80, 40, 0x7bc6ff, 0x5d95e4);
+          grid.material.transparent = true;
+          grid.material.opacity = 0.4;
+          grid.rotation.x = Math.PI / 2;
+          grid.position.y = -2;
+          scene.add(grid);
+
+          // 日本語コメント: 遠景ラインで奥行きを強調。
+          const horizonGeometry = new THREE.BufferGeometry();
+          const horizonVertices = [];
+          for (let i = -20; i <= 20; i++) {
+            horizonVertices.push(-40, 0, i * 2, 40, 0, i * 2);
+          }
+          horizonGeometry.setAttribute(
+            "position",
+            new THREE.Float32BufferAttribute(horizonVertices, 3)
+          );
+          const horizon = new THREE.LineSegments(
+            horizonGeometry,
+            new THREE.LineBasicMaterial({ color: 0x89c4ff, opacity: 0.32, transparent: true })
+          );
+          horizon.position.z = -60;
+          horizon.position.y = 8;
+          scene.add(horizon);
+
+          // 日本語コメント: プレイヤー機のワイヤーフレームを定義。
+          function makePlayerShip() {
+            const geom = new THREE.BufferGeometry();
+            const v = [
+              0, 0, -1, -0.6, 0, 1,
+              0, 0, -1, 0.6, 0, 1,
+              -0.6, 0, 1, 0, 0.6, 0.4,
+              0.6, 0, 1, 0, 0.6, 0.4,
+              0, 0.6, 0.4, 0, 0, -1,
+              -0.6, 0, 1, 0.6, 0, 1,
+            ];
+            geom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(v, 3)
+            );
+            return new THREE.LineSegments(geom, lineMaterial.clone());
+          }
+
+          const player = makePlayerShip();
+          player.position.set(0, -0.5, 4);
+          scene.add(player);
+          // 日本語コメント: デバッグモードはクエリで有効化し、F2で切り替え可能にする。
+          const debugState = {
+            invincible: new URLSearchParams(window.location.search).has("debug"),
+          };
+
+          // 日本語コメント: 地上照準用レティクルを生成。
+          const RETICLE_OFFSET_Z = 16;
+          const RETICLE_MIN_Z = -110;
+          function makeGroundReticle() {
+            const segments = 32;
+            const radiusOuter = 1.6;
+            const radiusInner = 1.2;
+            const vertices = [];
+            for (let i = 0; i < segments; i++) {
+              const a1 = (i / segments) * Math.PI * 2;
+              const a2 = ((i + 1) / segments) * Math.PI * 2;
+              vertices.push(
+                Math.cos(a1) * radiusOuter,
+                0,
+                Math.sin(a1) * radiusOuter,
+                Math.cos(a2) * radiusOuter,
+                0,
+                Math.sin(a2) * radiusOuter
+              );
+            }
+            // 日本語コメント: 十字ラインで中心を明示。
+            const cross = [
+              -radiusInner, 0, 0, -radiusInner * 0.2, 0, 0,
+              radiusInner * 0.2, 0, 0, radiusInner, 0, 0,
+              0, 0, -radiusInner, 0, 0, -radiusInner * 0.2,
+              0, 0, radiusInner * 0.2, 0, 0, radiusInner,
+            ];
+            vertices.push(...cross);
+            const geom = new THREE.BufferGeometry();
+            geom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(vertices, 3)
+            );
+            return new THREE.LineSegments(
+              geom,
+              new THREE.LineBasicMaterial({ color: 0xfff0a6, transparent: true, opacity: 0.85 })
+            );
+          }
+
+          const reticle = makeGroundReticle();
+          reticle.position.set(0, -1.8, player.position.z - RETICLE_OFFSET_Z);
+          scene.add(reticle);
+
+          // 日本語コメント: キー状態管理とプレイヤー運動量。
+          const keys = {
+            ArrowUp: false,
+            ArrowDown: false,
+            ArrowLeft: false,
+            ArrowRight: false,
+            Space: false,
+            KeyZ: false,
+          };
+          let shootCooldown = 0;
+          let bombCooldown = 0;
+
+          window.addEventListener("keydown", (e) => {
+            if (titleActive) {
+              if (e.code === "Space" || e.code === "Enter") {
+                e.preventDefault();
+                beginGame();
+              }
+              return;
+            }
+            if (keys.hasOwnProperty(e.code)) {
+              keys[e.code] = true;
+              e.preventDefault();
+            }
+            if (e.code === "F2") {
+              debugState.invincible = !debugState.invincible;
+              areaBanner.textContent = debugState.invincible
+                ? "DEBUG INVINCIBLE ON"
+                : "DEBUG INVINCIBLE OFF";
+              areaBanner.style.opacity = "1";
+              areaBannerTimer = 2;
+              updateHud();
+            }
+          });
+          window.addEventListener("keyup", (e) => {
+            if (titleActive) return;
+            if (keys.hasOwnProperty(e.code)) {
+              keys[e.code] = false;
+              e.preventDefault();
+            }
+          });
+
+          // 日本語コメント: 弾と敵・エフェクトなどの管理配列。
+          const bullets = [];
+          const bombs = [];
+          const enemies = [];
+          const enemyBullets = [];
+          const groundTargets = [];
+          const explosions = [];
+          const shockwaves = [];
+          const decorations = [];
+          const MAP_VIEW_LIMITS = { maxZ: 24, minZ: -140, maxX: 14, maxY: 14 };
+          const MAP_AREAS = [
+            {
+              name: "AREA 1 // EMERALD GROVE",
+              theme: "forest",
+              length: 360,
+              boss: { health: 420, tint: 0x6dffb8, weakpoint: 0xffffd9 },
+            },
+            {
+              name: "AREA 2 // AZURE RIVER RUN",
+              theme: "river",
+              length: 400,
+              boss: { health: 460, tint: 0x85e9ff, weakpoint: 0xe9fbff },
+            },
+            {
+              name: "AREA 3 // NAZCA PLATEAU",
+              theme: "grass",
+              length: 440,
+              boss: { health: 520, tint: 0xffdf8f, weakpoint: 0xffffc9 },
+            },
+          ];
+          let worldProgress = 0;
+          let nextMapEventIndex = 0;
+          let currentAreaIndex = -1;
+          let areaBannerTimer = 0;
+          let pendingBossConfig = null;
+          let timelineLocked = true;
+          let titleActive = true;
+          const mapEvents = buildMapEvents();
+          let score = 0;
+          let shield = 3;
+          let isGameOver = false;
+          let gameOverTimer = null;
+          let shotSequence = 0;
+          const MAX_SHOTS = 3;
+          let boss = null;
+          let bossSpawnTimer = Infinity;
+          let bossContactCooldown = 0;
+          let playerDestroyed = false;
+          const hud = document.getElementById("hud");
+          const gameOverOverlay = document.createElement("div");
+          gameOverOverlay.style.position = "fixed";
+          gameOverOverlay.style.top = "50%";
+          gameOverOverlay.style.left = "50%";
+          gameOverOverlay.style.transform = "translate(-50%, -50%)";
+          gameOverOverlay.style.color = "#fff6d4";
+          gameOverOverlay.style.fontSize = "28px";
+          gameOverOverlay.style.letterSpacing = "0.12em";
+          gameOverOverlay.style.textShadow = "0 0 12px #ffb469";
+          gameOverOverlay.style.display = "none";
+          gameOverOverlay.style.pointerEvents = "none";
+          gameOverOverlay.textContent = "CONDITION GREEN LOST | GAME OVER";
+          document.body.appendChild(gameOverOverlay);
+          const areaBanner = document.createElement("div");
+          areaBanner.style.position = "fixed";
+          areaBanner.style.top = "20%";
+          areaBanner.style.left = "50%";
+          areaBanner.style.transform = "translateX(-50%)";
+          areaBanner.style.fontSize = "18px";
+          areaBanner.style.letterSpacing = "0.16em";
+          areaBanner.style.padding = "10px 24px";
+          areaBanner.style.border = "1px solid #79e8ff";
+          areaBanner.style.background = "#052541cc";
+          areaBanner.style.color = "#e4fbff";
+          areaBanner.style.boxShadow = "0 0 18px #4a9fff";
+          areaBanner.style.pointerEvents = "none";
+          areaBanner.style.opacity = "0";
+          areaBanner.style.transition = "opacity 0.6s ease-out";
+          document.body.appendChild(areaBanner);
+
+          // 日本語コメント: ゲーム開始前のタイトルスクリーンを生成。
+          const titleOverlay = document.createElement("div");
+          titleOverlay.id = "title-overlay";
+          titleOverlay.style.position = "fixed";
+          titleOverlay.style.inset = "0";
+          titleOverlay.style.display = "flex";
+          titleOverlay.style.flexDirection = "column";
+          titleOverlay.style.alignItems = "center";
+          titleOverlay.style.justifyContent = "center";
+          titleOverlay.style.background =
+            "radial-gradient(120% 120% at 50% 30%, rgba(16,54,84,0.85) 0%, rgba(5,10,18,0.94) 56%, rgba(1,4,8,0.98) 100%)";
+          titleOverlay.style.transition = "opacity 0.85s ease";
+          titleOverlay.style.zIndex = "16";
+          titleOverlay.style.pointerEvents = "auto";
+
+          const titleCanvas = document.createElement("canvas");
+          titleCanvas.width = 800;
+          titleCanvas.height = 300;
+          titleCanvas.style.width = "70vw";
+          titleCanvas.style.maxWidth = "880px";
+          titleCanvas.style.filter = "drop-shadow(0 0 22px rgba(104,238,255,0.4))";
+          titleCanvas.style.marginBottom = "24px";
+          const titleCtx = titleCanvas.getContext("2d");
+          titleOverlay.appendChild(titleCanvas);
+
+          const titleSubtitle = document.createElement("div");
+          titleSubtitle.textContent = "WIREFRAME STRIKE MISSION";
+          titleSubtitle.style.fontSize = "16px";
+          titleSubtitle.style.letterSpacing = "0.32em";
+          titleSubtitle.style.color = "#c8f9ff";
+          titleSubtitle.style.textShadow = "0 0 10px rgba(102, 220, 255, 0.75)";
+          titleSubtitle.style.marginBottom = "12px";
+          titleOverlay.appendChild(titleSubtitle);
+
+          const titleHint = document.createElement("div");
+          titleHint.textContent = "PRESS SPACE / CLICK TO DEPLOY";
+          titleHint.style.fontSize = "13px";
+          titleHint.style.letterSpacing = "0.28em";
+          titleHint.style.color = "#88cfff";
+          titleHint.style.opacity = "0.82";
+          titleHint.style.textShadow = "0 0 6px rgba(82, 196, 255, 0.65)";
+          titleOverlay.appendChild(titleHint);
+
+          const titleCredit = document.createElement("div");
+          titleCredit.textContent = "KGNINJA 2025";
+          titleCredit.style.fontSize = "12px";
+          titleCredit.style.letterSpacing = "0.28em";
+          titleCredit.style.color = "#76e4ff";
+          titleCredit.style.marginTop = "18px";
+          titleCredit.style.textShadow = "0 0 10px rgba(110, 240, 255, 0.6)";
+          titleOverlay.appendChild(titleCredit);
+
+          const titleFooter = document.createElement("div");
+          titleFooter.textContent = "#KGNINJA SYSTEMS READY";
+          titleFooter.style.fontSize = "11px";
+          titleFooter.style.letterSpacing = "0.24em";
+          titleFooter.style.color = "#4ab0ff";
+          titleFooter.style.marginTop = "24px";
+          titleFooter.style.opacity = "0.65";
+          titleOverlay.appendChild(titleFooter);
+
+          document.body.appendChild(titleOverlay);
+
+          const endingOverlay = document.createElement("div");
+          endingOverlay.id = "ending-overlay";
+          endingOverlay.style.position = "fixed";
+          endingOverlay.style.inset = "0";
+          endingOverlay.style.display = "none";
+          endingOverlay.style.flexDirection = "column";
+          endingOverlay.style.alignItems = "center";
+          endingOverlay.style.justifyContent = "center";
+          endingOverlay.style.background =
+            "radial-gradient(100% 120% at 50% 40%, rgba(6, 18, 38, 0.92) 0%, rgba(1, 2, 8, 0.98) 80%)";
+          endingOverlay.style.zIndex = "18";
+          endingOverlay.style.color = "#e6f9ff";
+          endingOverlay.style.fontFamily = '"IBM Plex Mono", monospace';
+          endingOverlay.style.letterSpacing = "0.28em";
+          endingOverlay.style.opacity = "0";
+          endingOverlay.style.transition = "opacity 1.2s ease";
+          endingOverlay.style.pointerEvents = "none";
+
+          const endingTitle = document.createElement("div");
+          endingTitle.textContent = "MISSION COMPLETE";
+          endingTitle.style.fontSize = "28px";
+          endingTitle.style.marginBottom = "18px";
+          endingTitle.style.textShadow = "0 0 18px rgba(120, 230, 255, 0.75)";
+          endingOverlay.appendChild(endingTitle);
+
+          const endingCredit = document.createElement("div");
+          endingCredit.textContent = "ALL OPERATE KGNINJA 2025";
+          endingCredit.style.fontSize = "15px";
+          endingCredit.style.color = "#8dd7ff";
+          endingCredit.style.textShadow = "0 0 12px rgba(110, 240, 255, 0.6)";
+          endingCredit.style.marginBottom = "32px";
+          endingOverlay.appendChild(endingCredit);
+
+          const endingHint = document.createElement("div");
+          endingHint.textContent = "THANK YOU FOR FLYING ZOVIOUS";
+          endingHint.style.fontSize = "12px";
+          endingHint.style.letterSpacing = "0.24em";
+          endingHint.style.opacity = "0.68";
+          endingHint.style.textShadow = "0 0 8px rgba(90, 210, 255, 0.6)";
+          endingOverlay.appendChild(endingHint);
+
+          document.body.appendChild(endingOverlay);
+          let endingShown = false;
+
+          titleOverlay.addEventListener(
+            "pointerdown",
+            (event) => {
+              event.preventDefault();
+              beginGame();
+            },
+            { passive: false }
+          );
+
+          drawTitleLogo();
+          processMapEvents();
+
+          // 日本語コメント: タイトルスクリーンを閉じてゲームを開始する。
+          function beginGame() {
+            if (!titleActive) return;
+            titleActive = false;
+            timelineLocked = false;
+            titleOverlay.style.pointerEvents = "none";
+            titleOverlay.style.opacity = "0";
+            window.setTimeout(() => {
+              if (titleOverlay.parentElement) {
+                titleOverlay.parentElement.removeChild(titleOverlay);
+              }
+            }, 900);
+            Object.keys(keys).forEach((code) => {
+              keys[code] = false;
+            });
+            areaBanner.textContent = "MISSION START // ZOVIOUS";
+            areaBanner.style.opacity = "1";
+            areaBannerTimer = 2.6;
+          }
+
+          // 日本語コメント: タイトルロゴをキャンバスへ描画する。
+          function drawTitleLogo() {
+            if (!titleCanvas || !titleCtx) return;
+            if (!titleCanvas.isConnected) return;
+            const ratio = window.devicePixelRatio || 1;
+            const baseWidth = Math.min(window.innerWidth * 0.7, 880);
+            const baseHeight = Math.max(220, baseWidth * 0.38);
+            titleCanvas.width = baseWidth * ratio;
+            titleCanvas.height = baseHeight * ratio;
+            titleCanvas.style.width = `${baseWidth}px`;
+            titleCanvas.style.height = `${baseHeight}px`;
+            titleCtx.setTransform(1, 0, 0, 1, 0, 0);
+            titleCtx.scale(ratio, ratio);
+            titleCtx.clearRect(0, 0, baseWidth, baseHeight);
+
+            const bgGrad = titleCtx.createRadialGradient(
+              baseWidth / 2,
+              baseHeight * 0.45,
+              baseWidth * 0.08,
+              baseWidth / 2,
+              baseHeight,
+              baseWidth
+            );
+            bgGrad.addColorStop(0, "rgba(18, 92, 146, 0.35)");
+            bgGrad.addColorStop(1, "rgba(1, 6, 12, 0)");
+            titleCtx.fillStyle = bgGrad;
+            titleCtx.fillRect(0, 0, baseWidth, baseHeight);
+
+            let letterHeight = baseHeight * 0.58;
+            let letters = buildTitleLetterPaths(letterHeight);
+            const maxLogoWidth = baseWidth * 0.82;
+            if (letters.totalWidth > maxLogoWidth) {
+              const scale = maxLogoWidth / letters.totalWidth;
+              letterHeight *= scale;
+              letters = buildTitleLetterPaths(letterHeight);
+            }
+            const offsetX = (baseWidth - letters.totalWidth) / 2;
+            const top = (baseHeight - letterHeight) / 2;
+            const neonStroke = titleCtx.createLinearGradient(
+              offsetX,
+              top,
+              offsetX + letters.totalWidth,
+              top + letterHeight
+            );
+            neonStroke.addColorStop(0, "#7ef7ff");
+            neonStroke.addColorStop(0.45, "#4bd2ff");
+            neonStroke.addColorStop(1, "#d7f6ff");
+            titleCtx.lineCap = "round";
+            titleCtx.lineJoin = "round";
+
+            letters.entries.forEach((entry) => {
+              titleCtx.save();
+              titleCtx.translate(offsetX + entry.x, top);
+              titleCtx.shadowColor = "rgba(82, 232, 255, 0.65)";
+              titleCtx.shadowBlur = letterHeight * 0.3;
+              titleCtx.lineWidth = letterHeight * 0.12;
+              titleCtx.strokeStyle = neonStroke;
+              titleCtx.stroke(entry.path);
+              titleCtx.restore();
+            });
+
+            letters.entries.forEach((entry) => {
+              titleCtx.save();
+              titleCtx.translate(offsetX + entry.x, top);
+              titleCtx.shadowColor = "rgba(180, 255, 255, 0.42)";
+              titleCtx.shadowBlur = letterHeight * 0.08;
+              titleCtx.lineWidth = letterHeight * 0.045;
+              titleCtx.strokeStyle = "rgba(255, 255, 255, 0.82)";
+              titleCtx.stroke(entry.accent ?? entry.path);
+              titleCtx.restore();
+            });
+
+            titleCtx.beginPath();
+            titleCtx.moveTo(offsetX, top + letterHeight + letterHeight * 0.18);
+            titleCtx.lineTo(
+              offsetX + letters.totalWidth,
+              top + letterHeight + letterHeight * 0.18
+            );
+            titleCtx.lineWidth = letterHeight * 0.028;
+            titleCtx.strokeStyle = "rgba(92, 210, 255, 0.45)";
+            titleCtx.shadowColor = "rgba(92, 210, 255, 0.45)";
+            titleCtx.shadowBlur = letterHeight * 0.12;
+            titleCtx.stroke();
+
+            const sweep = titleCtx.createLinearGradient(
+              0,
+              top,
+              0,
+              top + letterHeight
+            );
+            sweep.addColorStop(0, "rgba(255, 255, 255, 0.18)");
+            sweep.addColorStop(0.6, "rgba(120, 220, 255, 0.04)");
+            sweep.addColorStop(1, "rgba(0, 0, 0, 0)");
+            titleCtx.fillStyle = sweep;
+            titleCtx.fillRect(offsetX, top, letters.totalWidth, letterHeight);
+          }
+
+          // 日本語コメント: エンディングオーバーレイを表示する。
+          function showEndingOverlay() {
+            if (endingShown) return;
+            endingShown = true;
+            stopBackgroundArpeggio();
+            endingOverlay.style.display = "flex";
+            requestAnimationFrame(() => {
+              endingOverlay.style.pointerEvents = "auto";
+              endingOverlay.style.opacity = "1";
+            });
+          }
+
+          // 日本語コメント: 文字パスを組み立ててロゴの骨格を返す。
+          function buildTitleLetterPaths(letterHeight) {
+            const gap = letterHeight * 0.09;
+            const entries = [];
+            let cursor = 0;
+
+            function addLetter(builder, width) {
+              const data = builder(width, letterHeight);
+              entries.push({
+                path: data.path,
+                accent: data.accent,
+                x: cursor,
+              });
+              cursor += width + gap;
+            }
+
+            addLetter(makeLetterZ, letterHeight * 0.72);
+            addLetter(makeLetterO, letterHeight * 0.74);
+            addLetter(makeLetterV, letterHeight * 0.74);
+            addLetter(makeLetterI, letterHeight * 0.42);
+            addLetter(makeLetterO, letterHeight * 0.74);
+            addLetter(makeLetterU, letterHeight * 0.76);
+            addLetter(makeLetterS, letterHeight * 0.76);
+
+            const totalWidth = cursor - gap;
+            return { entries, totalWidth };
+
+            function makeLetterZ(width, height) {
+              const path = new Path2D();
+              path.moveTo(0, 0);
+              path.lineTo(width, 0);
+              path.lineTo(width * 0.08, height);
+              path.lineTo(width, height);
+              const accent = new Path2D();
+              accent.moveTo(width * 0.14, height * 0.18);
+              accent.lineTo(width * 0.84, height * 0.12);
+              accent.moveTo(width * 0.18, height * 0.82);
+              accent.lineTo(width * 0.9, height * 0.88);
+              return { path, accent };
+            }
+
+            function makeLetterO(width, height) {
+              const path = new Path2D();
+              path.ellipse(width / 2, height / 2, width / 2, height / 2, 0, 0, Math.PI * 2);
+              const accent = new Path2D();
+              accent.ellipse(
+                width / 2,
+                height / 2,
+                width * 0.32,
+                height * 0.32,
+                0,
+                0,
+                Math.PI * 2
+              );
+              return { path, accent };
+            }
+
+            function makeLetterV(width, height) {
+              const path = new Path2D();
+              path.moveTo(0, 0);
+              path.lineTo(width / 2, height);
+              path.lineTo(width, 0);
+              const accent = new Path2D();
+              accent.moveTo(width * 0.12, 0);
+              accent.lineTo(width / 2, height * 0.74);
+              accent.lineTo(width * 0.88, 0);
+              return { path, accent };
+            }
+
+            function makeLetterI(width, height) {
+              const path = new Path2D();
+              path.moveTo(width * 0.2, 0);
+              path.lineTo(width * 0.8, 0);
+              path.moveTo(width / 2, 0);
+              path.lineTo(width / 2, height);
+              path.moveTo(width * 0.2, height);
+              path.lineTo(width * 0.8, height);
+              const accent = new Path2D();
+              accent.moveTo(width / 2, height * 0.18);
+              accent.lineTo(width / 2, height * 0.82);
+              return { path, accent };
+            }
+
+            function makeLetterU(width, height) {
+              const path = new Path2D();
+              path.moveTo(0, 0);
+              path.lineTo(0, height * 0.72);
+              path.quadraticCurveTo(width / 2, height, width, height * 0.72);
+              path.lineTo(width, 0);
+              const accent = new Path2D();
+              accent.moveTo(width * 0.15, 0);
+              accent.lineTo(width * 0.15, height * 0.62);
+              accent.quadraticCurveTo(
+                width / 2,
+                height * 0.88,
+                width * 0.85,
+                height * 0.62
+              );
+              accent.lineTo(width * 0.85, 0);
+              return { path, accent };
+            }
+
+            function makeLetterS(width, height) {
+              const path = new Path2D();
+              path.moveTo(width * 0.92, 0);
+              path.lineTo(width * 0.25, 0);
+              path.quadraticCurveTo(-width * 0.08, height * 0.08, width * 0.2, height * 0.44);
+              path.quadraticCurveTo(width * 0.45, height * 0.6, width * 0.78, height * 0.64);
+              path.quadraticCurveTo(width * 1.08, height * 0.7, width * 0.72, height * 0.92);
+              path.quadraticCurveTo(width * 0.4, height, width * 0.08, height);
+              path.lineTo(width * 0.78, height);
+              const accent = new Path2D();
+              accent.moveTo(width * 0.78, height * 0.14);
+              accent.quadraticCurveTo(
+                width * 0.42,
+                height * 0.22,
+                width * 0.46,
+                height * 0.45
+              );
+              accent.quadraticCurveTo(
+                width * 0.5,
+                height * 0.68,
+                width * 0.18,
+                height * 0.82
+              );
+              return { path, accent };
+            }
+          }
+
+          // 日本語コメント: シールド表示を残量に合わせて更新。
+          function shieldBar() {
+            const full = "█".repeat(shield);
+            const empty = "░".repeat(3 - shield);
+            return (full + empty).slice(0, 3);
+          }
+
+          function updateHud() {
+            const bossInfo = boss
+              ? ` | BOSS ${Math.max(0, Math.ceil(boss.health))
+                  .toString()
+                  .padStart(3, "0")}`
+              : "";
+            const areaInfo =
+              currentAreaIndex >= 0
+                ? ` | AREA ${(currentAreaIndex + 1).toString().padStart(2, "0")}`
+                : "";
+            const debugInfo = debugState.invincible ? " | DEBUG INVINCIBLE" : "";
+            hud.textContent = `SCORE ${score
+              .toString()
+              .padStart(6, "0")} | SHIELD ${shieldBar()}${areaInfo}${bossInfo}${debugInfo} | #KGNINJA`;
+          }
+
+          // 日本語コメント: エリア突入演出を管理。
+          function enterArea(areaIndex) {
+            currentAreaIndex = areaIndex;
+            const label = MAP_AREAS[areaIndex];
+            areaBanner.textContent = label.name;
+            areaBanner.style.opacity = "1";
+            areaBannerTimer = 3.6;
+            updateHud();
+          }
+
+          // 日本語コメント: バナー表示時間を調整してフェードアウト。
+          function updateAreaBanner(delta) {
+            if (areaBannerTimer > 0) {
+              areaBannerTimer -= delta;
+              if (areaBannerTimer <= 0) {
+                areaBanner.style.opacity = "0";
+              }
+            }
+          }
+
+          // 日本語コメント: ボス撃破後に次エリア進行を再開する。
+          function handleBossDefeat(areaIndex) {
+            enemyTimer = 0;
+            groundTimer = 1.8;
+            if (areaIndex == null) return;
+            const isLastArea = areaIndex + 1 >= MAP_AREAS.length;
+            timelineLocked = isLastArea ? true : false;
+            if (!isLastArea) {
+              areaBanner.textContent = `AREA ${String(areaIndex + 1).padStart(2, "0")} CLEAR`;
+              areaBanner.style.opacity = "1";
+              areaBannerTimer = 2.6;
+            } else {
+              areaBanner.textContent = "ALL AREAS SECURED";
+              areaBanner.style.opacity = "1";
+              areaBannerTimer = 0;
+              showEndingOverlay();
+            }
+          }
+
+          // 日本語コメント: マップ装飾をシーンへ登録し、スクロール管理する。
+          function queueDecoration(mesh, velocity = WORLD_SCROLL_SPEED, cleanupZ = 22) {
+            scene.add(mesh);
+            decorations.push({ mesh, velocity, cleanupZ });
+          }
+
+          // 日本語コメント: 森エリア用のツリークラスターを生成。
+          function spawnForestCluster(side = -1) {
+            const cluster = new THREE.Group();
+            const baseX = side * (5.5 + Math.random() * 0.8);
+            for (let i = 0; i < 3; i++) {
+              const treeGeom = new THREE.BufferGeometry();
+              const scale = 0.9 + Math.random() * 0.7;
+              const verts = [
+                0, 0, 0, 0, 3.2, 0,
+                -0.9, 2.4, 0, 0, 3.2, 0,
+                0, 3.2, 0, 0.9, 2.4, 0,
+                -1.2, 1.6, 0, 1.2, 1.6, 0,
+                -1.4, 0.8, 0, 1.4, 0.8, 0,
+                -1.6, 0, 0, 1.6, 0, 0,
+              ];
+              treeGeom.setAttribute(
+                "position",
+                new THREE.Float32BufferAttribute(verts, 3)
+              );
+              const tree = new THREE.LineSegments(treeGeom, forestMaterial);
+              tree.scale.set(scale, scale, scale);
+              tree.position.set((Math.random() - 0.5) * 1.2, -2, -i * 2.2);
+              cluster.add(tree);
+            }
+            cluster.position.set(baseX, 0, -110);
+            queueDecoration(cluster, WORLD_SCROLL_SPEED * 0.95);
+          }
+
+          // 日本語コメント: 川エリアの河川ラインとさざ波を生成。
+          function spawnRiverSegment(variant = 0) {
+            const river = new THREE.Group();
+            const bankGeom = new THREE.BufferGeometry();
+            const bankVerts = [
+              -3.8, 0, -10, -3.8, 0, 10,
+              3.8, 0, -10, 3.8, 0, 10,
+            ];
+            bankGeom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(bankVerts, 3)
+            );
+            const bank = new THREE.LineSegments(bankGeom, gateMaterial);
+            river.add(bank);
+
+            const rippleGeom = new THREE.BufferGeometry();
+            const ripples = [];
+            const rippleCount = 12;
+            for (let i = 0; i < rippleCount; i++) {
+              const offset = i * 1.6;
+              const sway = Math.sin(i * 1.3 + variant) * 0.6;
+              ripples.push(
+                -3.6 + sway, 0, -10 + offset,
+                3.6 - sway, 0, -10 + offset
+              );
+            }
+            rippleGeom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(ripples, 3)
+            );
+            const ripple = new THREE.LineSegments(rippleGeom, riverMaterial);
+            river.add(ripple);
+            river.position.set(0, -1.9, -120);
+            queueDecoration(river);
+          }
+
+          // 日本語コメント: 川エリアの橋梁を追加しプレイヤー進路を強調。
+          function spawnRiverBridge() {
+            const bridge = new THREE.Group();
+            const frameGeom = new THREE.BufferGeometry();
+            const verts = [
+              -4, 0, -4, -4, 1.5, -4,
+              4, 0, -4, 4, 1.5, -4,
+              -4, 1.5, -4, 4, 1.5, -4,
+              -4, 0, 4, -4, 1.5, 4,
+              4, 0, 4, 4, 1.5, 4,
+              -4, 1.5, 4, 4, 1.5, 4,
+              -4, 0, -4, -4, 0, 4,
+              4, 0, -4, 4, 0, 4,
+            ];
+            frameGeom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(verts, 3)
+            );
+            bridge.add(new THREE.LineSegments(frameGeom, gateMaterial));
+
+            const deckGeom = new THREE.BufferGeometry();
+            const deckVerts = [];
+            for (let i = -4; i <= 4; i++) {
+              deckVerts.push(-4, 0.4, i, 4, 0.4, i);
+            }
+            deckGeom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(deckVerts, 3)
+            );
+            bridge.add(new THREE.LineSegments(deckGeom, riverMaterial));
+            bridge.position.set(0, -2, -116);
+            queueDecoration(bridge, WORLD_SCROLL_SPEED * 0.9);
+          }
+
+          // 日本語コメント: 草原エリアの丘陵ラインを描画。
+          function spawnGrassPatch(side = 0) {
+            const patch = new THREE.Group();
+            const ridgeGeom = new THREE.BufferGeometry();
+            const ridgeVerts = [];
+            for (let i = -5; i <= 5; i++) {
+              const z = i * 1.6;
+              const wave = Math.sin(i * 0.8 + side) * 1.4;
+              ridgeVerts.push(-3 + wave, 0, z, 3 - wave, 0, z);
+            }
+            ridgeGeom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(ridgeVerts, 3)
+            );
+            const ridge = new THREE.LineSegments(ridgeGeom, grassMaterial);
+            patch.add(ridge);
+
+            const bladesGeom = new THREE.BufferGeometry();
+            const bladeVerts = [];
+            for (let i = 0; i < 16; i++) {
+              const x = (Math.random() - 0.5) * 6;
+              const z = (Math.random() - 0.5) * 6;
+              bladeVerts.push(x, 0, z, x, 0.8 + Math.random() * 0.6, z);
+            }
+            bladesGeom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(bladeVerts, 3)
+            );
+            patch.add(new THREE.LineSegments(bladesGeom, grassMaterial));
+            patch.position.set(side * 3, -2, -118);
+            queueDecoration(patch, WORLD_SCROLL_SPEED * 0.87);
+          }
+
+          // 日本語コメント: ナスカ地上絵風のラインアートを追加。
+          function spawnNazcaGlyph() {
+            const glyph = new THREE.Group();
+            const glyphGeom = new THREE.BufferGeometry();
+            const verts = [
+              -6, 0, -2, -2, 0, 0,
+              -2, 0, 0, -6, 0, 2,
+              -2, 0, 0, 2, 0, 4,
+              2, 0, 4, 6, 0, 2,
+              2, 0, 4, 6, 0, 6,
+              2, 0, 4, 3.2, 0, 8,
+              3.2, 0, 8, 1.2, 0, 9.2,
+              -1.2, 0, 9.2, -3.2, 0, 8,
+              -3.2, 0, 8, -2, 0, 4,
+              -6, 0, 6, -2, 0, 4,
+              -6, 0, 6, -8, 0, 8,
+              -8, 0, 8, -5.2, 0, 10,
+              6, 0, 2, 8, 0, 0,
+              8, 0, 0, 6, 0, -2,
+              6, 0, -2, 3.4, 0, -4,
+              3.4, 0, -4, 0, 0, -6,
+              0, 0, -6, -3.4, 0, -4,
+              -3.4, 0, -4, -6, 0, -2,
+            ];
+            glyphGeom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(verts, 3)
+            );
+            const line = new THREE.LineSegments(glyphGeom, glyphMaterial);
+            glyph.add(line);
+            glyph.position.set(0, -2.01, -125);
+            queueDecoration(glyph, WORLD_SCROLL_SPEED * 0.82, 28);
+          }
+
+          // 日本語コメント: エリア境界を示すゲートを生成。
+          function spawnAreaGate(areaIndex) {
+            const gate = new THREE.Group();
+            const frameGeom = new THREE.BufferGeometry();
+            const verts = [
+              -8, -1, 0, -8, 3, 0,
+              8, -1, 0, 8, 3, 0,
+              -8, 3, 0, 8, 3, 0,
+              -6, 1, 0, -6, 2.4, 0,
+              6, 1, 0, 6, 2.4, 0,
+            ];
+            frameGeom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(verts, 3)
+            );
+            gate.add(new THREE.LineSegments(frameGeom, gateMaterial));
+
+            const textGeom = new THREE.BufferGeometry();
+            const segs = [];
+            const seed = areaIndex + 1;
+            const length = 6;
+            for (let i = 0; i < length; i++) {
+              const x = -6 + (i / (length - 1)) * 12;
+              const y = 1.5 + Math.sin(i + seed) * 0.4;
+              segs.push(x, y, -0.2, x, y + 0.4, 0.2);
+            }
+            textGeom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(segs, 3)
+            );
+            gate.add(new THREE.LineSegments(textGeom, lineMaterial.clone()));
+            gate.position.set(0, -2, -112);
+            queueDecoration(gate, WORLD_SCROLL_SPEED);
+          }
+
+          // 日本語コメント: エリア構成に基づきマップイベントを生成。
+          function buildMapEvents() {
+            const events = [];
+            let travel = 0;
+            MAP_AREAS.forEach((area, index) => {
+              events.push({ z: travel, type: "areaStart", index });
+              events.push({ z: travel + 4, type: "areaGate", index });
+              if (area.theme === "forest") {
+                for (let i = 0; i < 6; i++) {
+                  events.push({
+                    z: travel + 12 + i * 12,
+                    type: "forestCluster",
+                    side: i % 2 === 0 ? -1 : 1,
+                  });
+                }
+              }
+              if (area.theme === "river") {
+                events.push({ z: travel + 14, type: "riverSegment", variant: 0 });
+                for (let i = 0; i < 5; i++) {
+                  events.push({
+                    z: travel + 24 + i * 16,
+                    type: "riverSegment",
+                    variant: i,
+                  });
+                }
+                events.push({ z: travel + area.length * 0.6, type: "riverBridge" });
+              }
+              if (area.theme === "grass") {
+                for (let i = 0; i < 4; i++) {
+                  events.push({
+                    z: travel + 18 + i * 18,
+                    type: "grassPatch",
+                    side: i % 2 === 0 ? -1 : 1,
+                  });
+                }
+                events.push({ z: travel + area.length * 0.65, type: "grassPatch", side: 0 });
+                events.push({ z: travel + area.length * 0.75, type: "nazcaGlyph" });
+              }
+              events.push({ z: travel + area.length - 18, type: "areaGate", index });
+              events.push({ z: travel + area.length - 12, type: "boss", index });
+              travel += area.length;
+            });
+            return events;
+          }
+
+          // 日本語コメント: 進行状況に応じマップイベントを逐次処理。
+          function processMapEvents() {
+            while (nextMapEventIndex < mapEvents.length) {
+              const evt = mapEvents[nextMapEventIndex];
+              if (worldProgress < evt.z) break;
+              handleMapEvent(evt);
+              nextMapEventIndex++;
+            }
+          }
+
+          // 日本語コメント: イベント種別に応じて地形要素やボスを発生させる。
+          function handleMapEvent(evt) {
+            switch (evt.type) {
+              case "areaStart":
+                enterArea(evt.index);
+                break;
+              case "areaGate":
+                spawnAreaGate(evt.index);
+                break;
+              case "forestCluster":
+                spawnForestCluster(evt.side);
+                break;
+              case "riverSegment":
+                spawnRiverSegment(evt.variant);
+                break;
+              case "riverBridge":
+                spawnRiverBridge();
+                break;
+              case "grassPatch":
+                spawnGrassPatch(evt.side);
+                break;
+              case "nazcaGlyph":
+                spawnNazcaGlyph();
+                break;
+              case "boss": {
+                const config = MAP_AREAS[evt.index].boss || {};
+                pendingBossConfig = { areaIndex: evt.index, config };
+                bossSpawnTimer = 5;
+                timelineLocked = true;
+                enemyTimer = Infinity;
+                groundTimer = Infinity;
+                areaBanner.textContent = "嵐の前の静けさ";
+                areaBanner.style.opacity = "1";
+                areaBannerTimer = 3;
+                break;
+              }
+              default:
+                break;
+            }
+          }
+
+          // 日本語コメント: オブジェクトが視界内にあるかを判定。
+          function isObjectVisible(obj) {
+            obj.updateMatrixWorld();
+            obj.getWorldPosition(visibilityVector);
+            if (
+              visibilityVector.z < MAP_VIEW_LIMITS.minZ ||
+              visibilityVector.z > MAP_VIEW_LIMITS.maxZ ||
+              Math.abs(visibilityVector.x) > MAP_VIEW_LIMITS.maxX ||
+              Math.abs(visibilityVector.y) > MAP_VIEW_LIMITS.maxY
+            ) {
+              return false;
+            }
+            clipVector.copy(visibilityVector);
+            clipVector.project(camera);
+            return (
+              clipVector.z >= -1 &&
+              clipVector.z <= 1 &&
+              Math.abs(clipVector.x) <= 1.05 &&
+              Math.abs(clipVector.y) <= 1.05
+            );
+          }
+
+          // 日本語コメント: 現在エリアの攻撃強度に応じて出現間隔を計算。
+          function getEnemySpawnDelay() {
+            const level = Math.max(0, currentAreaIndex);
+            if (level <= 0) {
+              return 2.6 + Math.random() * 1.4;
+            }
+            if (level === 1) {
+              return 1.8 + Math.random() * 1.1;
+            }
+            return 1.1 + Math.random() * 0.8;
+          }
+
+          // 日本語コメント: 画面内ショット数を管理。
+          function activeShotCount() {
+            const groups = new Set();
+            for (const bullet of bullets) {
+              if (bullet.groupId != null) groups.add(bullet.groupId);
+            }
+            return groups.size;
+          }
+
+          // 日本語コメント: 弾をワイヤーフレームラインで作成。
+          function makeTwinShot() {
+            const geom = new THREE.BufferGeometry();
+            const v = [
+              0, 0, 0, 0, 0, -1.6,
+              -0.12, 0, -0.8, 0.12, 0, -0.8,
+            ];
+            geom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(v, 3)
+            );
+            return new THREE.LineSegments(
+              geom,
+              new THREE.LineBasicMaterial({ color: 0xe3f6ff })
+            );
+          }
+
+          function spawnBullet() {
+            if (activeShotCount() >= MAX_SHOTS) return false;
+            const groupId = ++shotSequence;
+            const offsets = [-0.6, 0.6];
+            for (const offset of offsets) {
+              const bullet = makeTwinShot();
+              bullet.position.copy(player.position);
+              bullet.position.x += offset;
+              scene.add(bullet);
+              bullets.push({ mesh: bullet, velocity: -60, groupId });
+            }
+            playShotSound();
+            return true;
+          }
+
+          // 日本語コメント: 地上攻撃用の爆弾を生成。
+          function spawnBomb() {
+            const geom = new THREE.BufferGeometry();
+            const v = [
+              0, 0, 0, 0, 0, -1.4,
+              -0.15, 0, -0.5, 0.15, 0, -0.5,
+            ];
+            geom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(v, 3)
+            );
+            const bomb = new THREE.LineSegments(
+              geom,
+              new THREE.LineBasicMaterial({ color: 0xfff3ba })
+            );
+            const baseStart = player.position.clone();
+            baseStart.y += 0.4;
+            const target = reticle.position.clone();
+            target.y = -1.8;
+            const toTarget = target.clone().sub(baseStart);
+            let distance = toTarget.length();
+            if (distance < 0.001) {
+              toTarget.set(0, -0.4, -1);
+              distance = toTarget.length();
+            }
+            const forward = toTarget.clone().divideScalar(distance);
+            const launchPoint = baseStart.clone().addScaledVector(forward, 0.8);
+            launchPoint.y += 0.25;
+            const flightTime = THREE.MathUtils.clamp(distance / 24, 0.9, 1.5);
+            const gravity = new THREE.Vector3(0, -18, 0);
+            const displacement = target.clone().sub(launchPoint);
+            const velocity = displacement
+              .clone()
+              .sub(gravity.clone().multiplyScalar(0.5 * flightTime * flightTime))
+              .divideScalar(flightTime);
+            bomb.position.copy(launchPoint);
+            bomb.lookAt(launchPoint.clone().add(forward));
+            scene.add(bomb);
+            bombs.push({
+              mesh: bomb,
+              target,
+              velocity,
+              gravity,
+              elapsed: 0,
+              flightTime,
+            });
+            playBombDropSound();
+          }
+
+          // 日本語コメント: 敵A用のコイン型メッシュを生成。
+          function makeScoutMesh() {
+            const group = new THREE.Group();
+            const segments = 16;
+            const ringVerts = [];
+            for (let i = 0; i < segments; i++) {
+              const a1 = (i / segments) * Math.PI * 2;
+              const a2 = ((i + 1) / segments) * Math.PI * 2;
+              ringVerts.push(
+                Math.cos(a1) * 0.6,
+                0,
+                Math.sin(a1) * 0.6,
+                Math.cos(a2) * 0.6,
+                0,
+                Math.sin(a2) * 0.6
+              );
+            }
+            const ringGeom = new THREE.BufferGeometry();
+            ringGeom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(ringVerts, 3)
+            );
+            const outerRing = new THREE.LineSegments(ringGeom, scoutMaterial);
+            group.add(outerRing);
+
+            const crossGeom = new THREE.BufferGeometry();
+            const crossVerts = [
+              -0.45, 0, 0, 0.45, 0, 0,
+              0, 0, -0.45, 0, 0, 0.45,
+              -0.3, 0, -0.3, 0.3, 0, 0.3,
+              -0.3, 0, 0.3, 0.3, 0, -0.3,
+            ];
+            crossGeom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(crossVerts, 3)
+            );
+            group.add(new THREE.LineSegments(crossGeom, scoutMaterial));
+
+            const rimGeom = new THREE.BufferGeometry();
+            const rimVerts = [];
+            for (let i = 0; i < segments; i++) {
+              const a1 = (i / segments) * Math.PI * 2;
+              rimVerts.push(
+                Math.cos(a1) * 0.6,
+                -0.12,
+                Math.sin(a1) * 0.6,
+                Math.cos(a1) * 0.6,
+                0.12,
+                Math.sin(a1) * 0.6
+              );
+            }
+            rimGeom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(rimVerts, 3)
+            );
+            group.add(new THREE.LineSegments(rimGeom, scoutMaterial));
+            return group;
+          }
+
+          // 日本語コメント: 敵B用の平型立方体戦闘機メッシュ。
+          function makeFighterMesh() {
+            const group = new THREE.Group();
+            const frameGeom = new THREE.BufferGeometry();
+            const verts = [
+              -0.8, -0.1, -0.6, 0.8, -0.1, -0.6,
+              0.8, -0.1, -0.6, 0.8, -0.1, 0.6,
+              0.8, -0.1, 0.6, -0.8, -0.1, 0.6,
+              -0.8, -0.1, 0.6, -0.8, -0.1, -0.6,
+              -0.8, 0.1, -0.6, 0.8, 0.1, -0.6,
+              0.8, 0.1, -0.6, 0.8, 0.1, 0.6,
+              0.8, 0.1, 0.6, -0.8, 0.1, 0.6,
+              -0.8, 0.1, 0.6, -0.8, 0.1, -0.6,
+              -0.8, -0.1, -0.6, -0.8, 0.1, -0.6,
+              0.8, -0.1, -0.6, 0.8, 0.1, -0.6,
+              0.8, -0.1, 0.6, 0.8, 0.1, 0.6,
+              -0.8, -0.1, 0.6, -0.8, 0.1, 0.6,
+            ];
+            frameGeom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(verts, 3)
+            );
+            group.add(new THREE.LineSegments(frameGeom, fighterMaterial));
+
+            const wingGeom = new THREE.BufferGeometry();
+            const wingVerts = [
+              -1.1, 0, 0, -0.8, 0, -0.6,
+              -1.1, 0, 0, -0.8, 0, 0.6,
+              1.1, 0, 0, 0.8, 0, -0.6,
+              1.1, 0, 0, 0.8, 0, 0.6,
+            ];
+            wingGeom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(wingVerts, 3)
+            );
+            group.add(new THREE.LineSegments(wingGeom, fighterMaterial));
+
+            const noseGeom = new THREE.BufferGeometry();
+            const noseVerts = [
+              -0.4, 0.1, -0.6, 0.4, 0.1, -0.6,
+              0, 0.1, -0.6, 0, 0.4, -1.1,
+            ];
+            noseGeom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(noseVerts, 3)
+            );
+            group.add(new THREE.LineSegments(noseGeom, fighterMaterial));
+            return group;
+          }
+
+          // 日本語コメント: 敵C用の円盤型メッシュを生成。
+          function makeDiscMesh() {
+            const group = new THREE.Group();
+            const outer = [];
+            const segments = 18;
+            for (let i = 0; i < segments; i++) {
+              const a1 = (i / segments) * Math.PI * 2;
+              const a2 = ((i + 1) / segments) * Math.PI * 2;
+              outer.push(
+                Math.cos(a1) * 0.9,
+                0.05,
+                Math.sin(a1) * 0.9,
+                Math.cos(a2) * 0.9,
+                0.05,
+                Math.sin(a2) * 0.9
+              );
+              outer.push(
+                Math.cos(a1) * 0.9,
+                -0.05,
+                Math.sin(a1) * 0.9,
+                Math.cos(a2) * 0.9,
+                -0.05,
+                Math.sin(a2) * 0.9
+              );
+            }
+            const outerGeom = new THREE.BufferGeometry();
+            outerGeom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(outer, 3)
+            );
+            group.add(new THREE.LineSegments(outerGeom, discMaterial));
+
+            const spokeGeom = new THREE.BufferGeometry();
+            const spokeVerts = [];
+            for (let i = 0; i < 6; i++) {
+              const ang = (i / 6) * Math.PI * 2;
+              spokeVerts.push(
+                0,
+                0,
+                0,
+                Math.cos(ang) * 0.7,
+                0.02,
+                Math.sin(ang) * 0.7
+              );
+            }
+            spokeGeom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(spokeVerts, 3)
+            );
+            group.add(new THREE.LineSegments(spokeGeom, discMaterial));
+            return group;
+          }
+
+          // 日本語コメント: 破壊不可能なモノリスのメッシュを生成。
+          function makeMonolithMesh() {
+            const group = new THREE.Group();
+            const bodyGeom = new THREE.BufferGeometry();
+            const w = 0.9;
+            const h = 3.6;
+            const d = 0.9;
+            const bodyVerts = [
+              -w, -h / 2, -d, w, -h / 2, -d,
+              w, -h / 2, -d, w, -h / 2, d,
+              w, -h / 2, d, -w, -h / 2, d,
+              -w, -h / 2, d, -w, -h / 2, -d,
+              -w, h / 2, -d, w, h / 2, -d,
+              w, h / 2, -d, w, h / 2, d,
+              w, h / 2, d, -w, h / 2, d,
+              -w, h / 2, d, -w, h / 2, -d,
+              -w, -h / 2, -d, -w, h / 2, -d,
+              w, -h / 2, -d, w, h / 2, -d,
+              w, -h / 2, d, w, h / 2, d,
+              -w, -h / 2, d, -w, h / 2, d,
+            ];
+            bodyGeom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(bodyVerts, 3)
+            );
+            const body = new THREE.LineSegments(bodyGeom, monolithMaterial);
+            group.add(body);
+
+            const orbitGeom = new THREE.BufferGeometry();
+            const orbitVerts = [];
+            const orbitSegments = 32;
+            for (let i = 0; i < orbitSegments; i++) {
+              const a1 = (i / orbitSegments) * Math.PI * 2;
+              const a2 = ((i + 1) / orbitSegments) * Math.PI * 2;
+              orbitVerts.push(
+                Math.cos(a1) * 1.8,
+                0,
+                Math.sin(a1) * 1.8,
+                Math.cos(a2) * 1.8,
+                0,
+                Math.sin(a2) * 1.8
+              );
+            }
+            orbitGeom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(orbitVerts, 3)
+            );
+            const orbit = new THREE.LineSegments(orbitGeom, monolithMaterial.clone());
+            orbit.material.opacity = 0.6;
+            group.add(orbit);
+            return group;
+          }
+
+          // 日本語コメント: 敵タイプをエリアに応じて選択。
+          function chooseEnemyType(level) {
+            const r = Math.random();
+            if (level <= 0) {
+              if (r < 0.68) return "A";
+              if (r < 0.88) return "B";
+              if (r < 0.96) return "C";
+              return "monolith";
+            }
+            if (level === 1) {
+              if (r < 0.35) return "A";
+              if (r < 0.7) return "B";
+              if (r < 0.9) return "C";
+              return "monolith";
+            }
+            if (r < 0.2) return "A";
+            if (r < 0.55) return "B";
+            if (r < 0.78) return "C";
+            return "monolith";
+          }
+
+          // 日本語コメント: 敵B退却時の斉射。
+          function fireRetreatVolley(origin, level = 0) {
+            const offsets = [-0.6, 0, 0.6];
+            for (const off of offsets) {
+              const shotOrigin = origin.clone();
+              shotOrigin.y += 0.25;
+              const target = player.position.clone();
+              target.x += off * 0.6;
+              target.y += 0.1;
+              spawnEnemyBullet(
+                shotOrigin,
+                target,
+                16 + level * 1.5
+              );
+            }
+          }
+
+          // 日本語コメント: 敵C散弾。
+          function fireDiscScatter(origin, level = 0) {
+            const count = 5 + Math.floor(Math.random() * 2);
+            for (let i = 0; i < count; i++) {
+              const shotOrigin = origin.clone();
+              const target = player.position.clone();
+              target.x += (Math.random() - 0.5) * 4.2;
+              target.y += (Math.random() - 0.5) * 1.2;
+              target.z += (Math.random() - 0.5) * 2.6;
+              spawnEnemyBullet(
+                shotOrigin,
+                target,
+                18 + level * 2 + Math.random() * 3
+              );
+            }
+          }
+
+          // 日本語コメント: 敵A編隊を生成。
+          function spawnEnemyFormationA(level) {
+            const count = 3 + Math.floor(Math.random() * 2);
+            const baseX = (Math.random() - 0.5) * 10;
+            const baseZ = -92 - Math.random() * 24;
+            for (let i = 0; i < count; i++) {
+              const mesh = makeScoutMesh();
+              const offset = (i - (count - 1) / 2) * 1.4;
+              mesh.position.set(baseX + offset, 0.6 + Math.random() * 0.2, baseZ - i * 1.6);
+              scene.add(mesh);
+              enemies.push({
+                type: "A",
+                mesh,
+                state: "approach",
+                speed: 12 + level * 2,
+                alignSpeed: 4 + level * 0.8,
+                baseY: mesh.position.y,
+                noisePhase: Math.random() * Math.PI * 2,
+                aggression: level,
+                escapeVector: null,
+              });
+            }
+          }
+
+          // 日本語コメント: 敵Bを生成。
+          function spawnEnemyTypeB(level) {
+            const mesh = makeFighterMesh();
+            const startX = (Math.random() < 0.5 ? -1 : 1) * (6 + Math.random() * 2);
+            const startZ = -96 - Math.random() * 20;
+            mesh.position.set(startX, 1.1, startZ);
+            const stopZ = -24 + Math.random() * 6;
+            const targetPoint = new THREE.Vector3(0, 1.1, stopZ);
+            const direction = targetPoint.clone().sub(mesh.position).normalize();
+            const retreatVector = new THREE.Vector3(
+              startX > 0 ? 1 : -1,
+              0,
+              -1.2
+            ).normalize();
+            scene.add(mesh);
+            enemies.push({
+              type: "B",
+              mesh,
+              state: "approach",
+              direction,
+              approachSpeed: 18 + level * 2,
+              retreatVector,
+              retreatSpeed: 24 + level * 3,
+              holdZ: stopZ,
+              stateTimer: 0,
+              fired: false,
+              aggression: level,
+            });
+          }
+
+          // 日本語コメント: 敵Cを生成。
+          function spawnEnemyTypeC(level) {
+            const mesh = makeDiscMesh();
+            const startX = (Math.random() - 0.5) * 14;
+            const startZ = -110 - Math.random() * 25;
+            const startY = 0.9 + Math.random() * 0.4;
+            mesh.position.set(startX, startY, startZ);
+            const targetPoint = player.position.clone();
+            targetPoint.y = 0.6;
+            const toPlayer = targetPoint.clone().sub(mesh.position).normalize();
+            const approachSpeed = 32 + level * 4;
+            const approachVelocity = toPlayer.clone().multiplyScalar(approachSpeed);
+            scene.add(mesh);
+            enemies.push({
+              type: "C",
+              mesh,
+              state: "dashIn",
+              velocity: approachVelocity,
+              maxApproachTime: 1 + Math.random() * 0.5,
+              elapsed: 0,
+              scatterVector: null,
+              scatterSpeed: 40 + level * 6,
+              aggression: level,
+            });
+          }
+
+          // 日本語コメント: 空中に浮かぶ破壊不能モノリスを生成。
+          function spawnMonolith(level) {
+            const mesh = makeMonolithMesh();
+            const startX = (Math.random() - 0.5) * 14;
+            const startZ = -120 - Math.random() * 30;
+            const startY = 1 + Math.random() * 2;
+            mesh.position.set(startX, startY, startZ);
+            mesh.rotation.y = Math.random() * Math.PI * 2;
+            scene.add(mesh);
+            enemies.push({
+              type: "monolith",
+              mesh,
+              baseX: startX,
+              swayPhase: Math.random() * Math.PI * 2,
+              swaySpeed: 1 + Math.random() * 0.6,
+              swayAmplitude: 1.4 + Math.random() * 1.8,
+              rotationSpeed: 0.4 + Math.random() * 0.3,
+              forwardSpeed: 14 + level * 1.5,
+            });
+          }
+
+          // 日本語コメント: 敵機スポーンをタイプ別に分岐。
+          function spawnEnemy() {
+            const level = Math.max(0, currentAreaIndex);
+            const type = chooseEnemyType(level);
+            switch (type) {
+              case "A":
+                spawnEnemyFormationA(level);
+                break;
+              case "B":
+                spawnEnemyTypeB(level);
+                break;
+              case "C":
+                spawnEnemyTypeC(level);
+                break;
+              case "monolith":
+                spawnMonolith(level);
+                break;
+              default:
+                spawnEnemyFormationA(level);
+                break;
+            }
+          }
+
+          // 日本語コメント: 地上物（砲台）を生成。
+          function spawnGroundTarget() {
+            const ground = new THREE.Group();
+            const theme = MAP_AREAS[currentAreaIndex]?.theme;
+            const platformMaterial =
+              theme === "river"
+                ? riverMaterial
+                : theme === "grass"
+                ? grassMaterial
+                : theme === "forest"
+                ? forestMaterial
+                : groundMaterial;
+            let posX = (Math.random() - 0.5) * 12;
+            if (theme === "river") {
+              posX = (Math.random() < 0.5 ? -1 : 1) * (5.4 + Math.random() * 1.2);
+            } else if (theme === "forest") {
+              posX *= 0.7;
+            }
+            const startZ = -70 - Math.random() * 60;
+            const isHover = Math.random() < 0.35;
+
+            if (isHover) {
+              const hullGeom = new THREE.BufferGeometry();
+              const hullVerts = [
+                -1.4, 0.2, -0.8, 1.4, 0.2, -0.8,
+                1.4, 0.2, -0.8, 1.4, 0.2, 0.8,
+                1.4, 0.2, 0.8, -1.4, 0.2, 0.8,
+                -1.4, 0.2, 0.8, -1.4, 0.2, -0.8,
+                -1.4, -0.2, -0.8, 1.4, -0.2, -0.8,
+                1.4, -0.2, -0.8, 1.4, -0.2, 0.8,
+                1.4, -0.2, 0.8, -1.4, -0.2, 0.8,
+                -1.4, -0.2, 0.8, -1.4, -0.2, -0.8,
+                -1.4, -0.2, -0.8, -1.4, 0.2, -0.8,
+                1.4, -0.2, -0.8, 1.4, 0.2, -0.8,
+                1.4, -0.2, 0.8, 1.4, 0.2, 0.8,
+                -1.4, -0.2, 0.8, -1.4, 0.2, 0.8,
+              ];
+              hullGeom.setAttribute(
+                "position",
+                new THREE.Float32BufferAttribute(hullVerts, 3)
+              );
+              const hoverHull = new THREE.LineSegments(hullGeom, hoverTurretMaterial);
+              const cannonGeom = new THREE.BufferGeometry();
+              const cannonVerts = [
+                0, 0.2, 0, 0, 1.1, 0,
+                0, 1.1, 0, 0.6, 1.3, 0,
+                0, 1.1, 0, -0.6, 1.3, 0,
+              ];
+              cannonGeom.setAttribute(
+                "position",
+                new THREE.Float32BufferAttribute(cannonVerts, 3)
+              );
+              const cannon = new THREE.LineSegments(cannonGeom, hoverTurretMaterial);
+              const thrusterGeom = new THREE.BufferGeometry();
+              const thrusterVerts = [];
+              const segments = 12;
+              for (let i = 0; i < segments; i++) {
+                const a1 = (i / segments) * Math.PI * 2;
+                thrusterVerts.push(
+                  Math.cos(a1) * 0.8,
+                  -0.25,
+                  Math.sin(a1) * 0.8,
+                  Math.cos(a1) * 0.8,
+                  -0.45,
+                  Math.sin(a1) * 0.8
+                );
+              }
+              thrusterGeom.setAttribute(
+                "position",
+                new THREE.Float32BufferAttribute(thrusterVerts, 3)
+              );
+              const thruster = new THREE.LineSegments(thrusterGeom, hoverTurretMaterial);
+              ground.add(hoverHull);
+              ground.add(cannon);
+              ground.add(thruster);
+              ground.position.set(posX, -1.6, startZ);
+              scene.add(ground);
+              groundTargets.push({
+                mesh: ground,
+                velocity: 12,
+                hover: true,
+                hoverBaseX: posX,
+                hoverDir: Math.random() < 0.5 ? -1 : 1,
+                hoverSpeed: 14 + Math.random() * 4,
+              });
+            } else {
+              const geom = new THREE.BufferGeometry();
+              const size = 1 + Math.random() * 0.4;
+              const v = [
+                -size, 0, -size, size, 0, -size,
+                size, 0, -size, size, 0, size,
+                size, 0, size, -size, 0, size,
+                -size, 0, size, -size, 0, -size,
+                -size, 0, 0, size, 0, 0,
+              ];
+              geom.setAttribute(
+                "position",
+                new THREE.Float32BufferAttribute(v, 3)
+              );
+              const turretGeom = new THREE.BufferGeometry();
+              const turretVertices = [
+                0, 0, 0, 0, 1.2, 0,
+                -0.6, 1.2, 0, 0.6, 1.2, 0,
+                -0.4, 1.2, 0, 0, 1.6, -0.8,
+                0.4, 1.2, 0, 0, 1.6, -0.8,
+              ];
+              turretGeom.setAttribute(
+                "position",
+                new THREE.Float32BufferAttribute(turretVertices, 3)
+              );
+              const base = new THREE.LineSegments(geom, platformMaterial);
+              const turret = new THREE.LineSegments(turretGeom, platformMaterial);
+              turret.position.y = 0.01;
+              ground.add(base);
+              ground.add(turret);
+              ground.position.set(posX, theme === "river" ? -1.9 : -2, startZ);
+              scene.add(ground);
+              groundTargets.push({ mesh: ground, velocity: 10, hover: false });
+            }
+          }
+
+          // 日本語コメント: 浮遊巨大要塞ボスを生成。
+          function spawnFortressBoss(config = {}, areaIndex = currentAreaIndex) {
+            if (boss) return;
+            const fortress = new THREE.Group();
+
+            function lineMesh(vertices, material) {
+              const geom = new THREE.BufferGeometry();
+              geom.setAttribute(
+                "position",
+                new THREE.Float32BufferAttribute(vertices, 3)
+              );
+              return new THREE.LineSegments(geom, material);
+            }
+
+            const baseVertices = [
+              -9, 0, -6, 9, 0, -6,
+              9, 0, -6, 9, 0, 6,
+              9, 0, 6, -9, 0, 6,
+              -9, 0, 6, -9, 0, -6,
+              -5, 0, -4, 5, 0, -4,
+              5, 0, -4, 5, 0, 4,
+              5, 0, 4, -5, 0, 4,
+              -5, 0, 4, -5, 0, -4,
+            ];
+            const upperVertices = [
+              -7, 1.6, -4, 7, 1.6, -4,
+              7, 1.6, -4, 7, 1.6, 4,
+              7, 1.6, 4, -7, 1.6, 4,
+              -7, 1.6, 4, -7, 1.6, -4,
+              -7, 1.6, -4, -9, 0, -6,
+              7, 1.6, -4, 9, 0, -6,
+              7, 1.6, 4, 9, 0, 6,
+              -7, 1.6, 4, -9, 0, 6,
+            ];
+            const ventVertices = [
+              -3, 0.2, -5.5, -3, 0.2, 5.5,
+              0, 0.2, -5.5, 0, 0.2, 5.5,
+              3, 0.2, -5.5, 3, 0.2, 5.5,
+            ];
+            const gunVertices = [
+              -6, 1.6, 0, -6, 1.6, -3,
+              -6, 1.6, -3, -5.2, 1.6, -4.6,
+              6, 1.6, 0, 6, 1.6, -3,
+              6, 1.6, -3, 5.2, 1.6, -4.6,
+            ];
+
+            const tint = config.tint ?? 0xffd5a1;
+            const baseMaterial = groundMaterial.clone();
+            baseMaterial.color = new THREE.Color(tint);
+            const upperMaterial = baseMaterial.clone();
+            upperMaterial.opacity = 0.86;
+            const ventMaterial = baseMaterial.clone();
+            ventMaterial.opacity = 0.7;
+            fortress.add(lineMesh(baseVertices, baseMaterial));
+            fortress.add(lineMesh(upperVertices, upperMaterial));
+            fortress.add(lineMesh(ventVertices, ventMaterial));
+            const gunMaterial = baseMaterial.clone();
+            gunMaterial.opacity = 0.7;
+            fortress.add(lineMesh(gunVertices, gunMaterial));
+
+            // 日本語コメント: 砲台ラインメッシュを生成するヘルパー。
+            function createTurretMesh(material) {
+              const turretVertices = [
+                0, 0, 0, 0, 1.2, 0,
+                -0.6, 0.4, 0, 0.6, 0.4, 0,
+                0, 0.8, -0.6, 0, 0.8, 0.6,
+                -0.35, 1.2, 0, 0.35, 1.2, 0,
+              ];
+              return lineMesh(turretVertices, material);
+            }
+
+            const weakpointMarkerVertices = [
+              -1, 0, 0, 1, 0, 0,
+              0, 0, -1, 0, 0, 1,
+            ];
+            const weakpointActiveColor = config.weakpoint ?? 0xfff7b1;
+            const weakpointShieldColor = 0x86c4ff;
+            const weakpointMaterial = new THREE.LineBasicMaterial({
+              color: weakpointShieldColor,
+              transparent: true,
+              opacity: 0.55,
+            });
+            const weakpointMarker = lineMesh(
+              weakpointMarkerVertices,
+              weakpointMaterial
+            );
+            weakpointMarker.scale.set(0.9, 0.9, 0.9);
+            const weakpointLocal = new THREE.Vector3(0, 0.35, 0);
+            weakpointMarker.position.copy(weakpointLocal);
+            fortress.add(weakpointMarker);
+
+            // 日本語コメント: コア周辺に近接配置された四基の砲台を配置。
+            const turretMaterial = baseMaterial.clone();
+            turretMaterial.opacity = 0.95;
+            const turretOffsets = [
+              new THREE.Vector3(-2.6, 0.9, -1.9),
+              new THREE.Vector3(2.6, 0.9, -1.9),
+              new THREE.Vector3(-2.6, 0.9, 1.9),
+              new THREE.Vector3(2.6, 0.9, 1.9),
+            ];
+            const turrets = turretOffsets.map((offset) => {
+              const mesh = createTurretMesh(turretMaterial.clone());
+              mesh.position.copy(offset);
+              fortress.add(mesh);
+              return {
+                mesh,
+                localPosition: offset.clone(),
+                health: 3,
+                destroyed: false,
+                cooldown: 0,
+              };
+            });
+
+            // 日本語コメント: 中央コアを視覚化するリングを追加。
+            const coreVertices = [];
+            const coreSegments = 24;
+            for (let i = 0; i < coreSegments; i++) {
+              const angleA = (i / coreSegments) * Math.PI * 2;
+              const angleB = ((i + 1) / coreSegments) * Math.PI * 2;
+              coreVertices.push(
+                Math.cos(angleA) * 0.9,
+                0.15,
+                Math.sin(angleA) * 0.9,
+                Math.cos(angleB) * 0.9,
+                0.15,
+                Math.sin(angleB) * 0.9
+              );
+            }
+            const coreMaterial = new THREE.LineBasicMaterial({
+              color: weakpointShieldColor,
+              transparent: true,
+              opacity: 0.4,
+            });
+            const coreMesh = lineMesh(coreVertices, coreMaterial);
+            coreMesh.position.copy(weakpointLocal);
+            fortress.add(coreMesh);
+
+            fortress.position.set(0, -1.2, -80);
+            scene.add(fortress);
+            startFortressHum();
+
+            boss = {
+              mesh: fortress,
+              health: config.health ?? 480,
+              maxHealth: config.health ?? 480,
+              fireTimer: 2.2,
+              entryTimer: 5.5,
+              weakpointLocal,
+              weakpointMarker,
+              areaIndex,
+              weakpointActiveColor,
+              weakpointShieldColor,
+              turrets,
+              core: {
+                mesh: coreMesh,
+                marker: weakpointMarker,
+                destroyed: false,
+              },
+              collapsing: null,
+            };
+            bossSpawnTimer = Infinity;
+            updateHud();
+          }
+
+          // 日本語コメント: ボスへのダメージ処理を統合。
+          function damageBoss(amount, hitPos, options = {}) {
+            if (!boss || isGameOver) return;
+            const { coreKill = false } = options;
+            if (boss.collapsing) {
+              return;
+            }
+            if (hitPos) {
+              spawnExplosion(hitPos.clone(), 0xfff0b8, 26);
+            }
+            boss.health = Math.max(0, boss.health - amount);
+            score += 120;
+            updateHud();
+            if (boss.health <= 0 || coreKill) {
+              boss.health = 0;
+              triggerBossCollapse(coreKill ? "core" : "damage");
+            }
+          }
+
+          // 日本語コメント: 要塞撃破時の墜落演出を開始。
+          function triggerBossCollapse(reason = "damage") {
+            if (!boss || boss.collapsing) return;
+            boss.collapsing = {
+              timer: 0,
+              duration: reason === "core" ? 4.2 : 5,
+              reason,
+              nextSpark: 0.4,
+              rollDirection: Math.random() > 0.5 ? 1 : -1,
+            };
+            if (boss.weakpointMarker) {
+              boss.weakpointMarker.visible = false;
+            }
+            if (boss.core && boss.core.mesh && boss.core.mesh.material) {
+              boss.core.mesh.material.opacity = 0.15;
+            }
+            stopFortressHum();
+            areaBanner.textContent = "FORTRESS COLLAPSING";
+            areaBanner.style.opacity = "1";
+            areaBannerTimer = 3.6;
+          }
+
+          // 日本語コメント: 墜落完了時に最終爆発を実行し、ゲーム状態を更新。
+          function finalizeBossCollapse() {
+            if (!boss) return;
+            const defeatedArea = boss.areaIndex;
+            const collapsePos = boss.mesh.position.clone();
+            spawnExplosion(collapsePos.clone(), 0xffffd6, 120);
+            spawnExplosion(collapsePos.clone(), 0xff94b4, 90);
+            spawnExplosion(collapsePos.clone(), 0xffc766, 160);
+            spawnShockwave(collapsePos.clone(), 0xfff7b1);
+            playExplosionSound();
+            scene.remove(boss.mesh);
+            boss = null;
+            bossSpawnTimer = Infinity;
+            updateHud();
+            handleBossDefeat(defeatedArea);
+          }
+
+          // 日本語コメント: 砲台に命中した際の耐久処理。
+          function handleTurretDamage(turret, hitPos) {
+            if (!boss || !turret || turret.destroyed) return;
+            spawnExplosion(hitPos.clone(), 0xfff0b8, 18);
+            playMetalClangSound();
+            turret.health -= 1;
+            if (turret.health <= 0) {
+              turret.destroyed = true;
+              if (turret.mesh.parent) {
+                turret.mesh.parent.remove(turret.mesh);
+              }
+              spawnExplosion(hitPos.clone(), 0xffd29a, 48);
+              playExplosionSound();
+              score += 160;
+              updateHud();
+              damageBoss(120, hitPos.clone());
+            }
+          }
+
+          // 日本語コメント: コア命中時は即座に撃破フローへ移行。
+          function handleCoreDamage(hitPos) {
+            if (!boss || !boss.core || boss.core.destroyed) return;
+            spawnExplosion(hitPos.clone(), 0xfff6d0, 48);
+            boss.core.destroyed = true;
+            if (boss.core.mesh && boss.core.mesh.parent) {
+              boss.core.mesh.visible = false;
+            }
+            if (boss.weakpointMarker) {
+              boss.weakpointMarker.visible = false;
+            }
+            score += 480;
+            updateHud();
+            damageBoss(boss.health, hitPos.clone(), {
+              coreKill: true,
+            });
+          }
+
+          // 日本語コメント: 爆発パーティクルを生成。
+          function spawnExplosion(position, color = 0xffd29a, count = 18) {
+            const geom = new THREE.BufferGeometry();
+            const positions = [];
+            const velocities = [];
+            for (let i = 0; i < count; i++) {
+              const dir = new THREE.Vector3(
+                (Math.random() - 0.5) * 2,
+                (Math.random() - 0.3) * 2,
+                (Math.random() - 0.5) * 2
+              )
+                .normalize()
+                .multiplyScalar(0.4 + Math.random() * 0.6);
+              positions.push(0, 0, 0);
+              velocities.push(dir.x, dir.y, dir.z);
+            }
+            geom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(positions, 3)
+            );
+            const explosion = new THREE.Points(
+              geom,
+              new THREE.PointsMaterial({
+                color,
+                size: 0.18,
+                transparent: true,
+                opacity: 0.9,
+              })
+            );
+            explosion.position.copy(position);
+            scene.add(explosion);
+            explosions.push({
+              points: explosion,
+              velocities: new Float32Array(velocities),
+              life: 0.8,
+              maxLife: 0.8,
+            });
+          }
+
+          // 日本語コメント: 敵弾を生成。
+          function spawnEnemyBullet(origin, target, speed = 14) {
+            const geom = new THREE.BufferGeometry();
+            const v = [
+              0, 0, 0, 0, 0, 1.4,
+              -0.12, 0, 0.6, 0.12, 0, 0.6,
+            ];
+            geom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(v, 3)
+            );
+            const bullet = new THREE.LineSegments(
+              geom,
+              new THREE.LineBasicMaterial({ color: 0xff94b4 })
+            );
+            bullet.position.copy(origin);
+            bullet.lookAt(target);
+            scene.add(bullet);
+            const direction = new THREE.Vector3().subVectors(target, origin).normalize();
+            enemyBullets.push({
+              mesh: bullet,
+              velocity: direction.clone().multiplyScalar(speed),
+            });
+          }
+
+          // 日本語コメント: プレイヤー撃墜時の衝撃波を生成。
+          function spawnShockwave(origin, color = 0xfff7b1) {
+            const segments = 48;
+            const verts = [];
+            for (let i = 0; i < segments; i++) {
+              const angle = (i / segments) * Math.PI * 2;
+              verts.push(Math.cos(angle), 0, Math.sin(angle));
+            }
+            const geom = new THREE.BufferGeometry();
+            geom.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(verts, 3)
+            );
+            const material = new THREE.LineBasicMaterial({
+              color,
+              transparent: true,
+              opacity: 0.85,
+            });
+            const wave = new THREE.LineLoop(geom, material);
+            wave.position.copy(origin);
+            wave.scale.set(0.2, 0.2, 0.2);
+            scene.add(wave);
+            shockwaves.push({
+              mesh: wave,
+              life: 0.7,
+              maxLife: 0.7,
+            });
+          }
+
+          // 日本語コメント: 自機破壊時の大爆発演出をまとめる。
+          function spawnPlayerDestruction() {
+            const center = player.position.clone();
+            spawnExplosion(center, 0xfff6c1, 140);
+            spawnExplosion(center, 0xff94b4, 120);
+            spawnExplosion(center, 0xffc766, 160);
+            spawnShockwave(center, 0xfff7b1);
+            spawnShockwave(center, 0xffe4a1);
+            playPlayerDestructionSound();
+          }
+
+          // 日本語コメント: シールド減算とゲームオーバー判定。
+          function applyDamage(amount = 1, hitPos = null) {
+            if (isGameOver) return;
+            if (debugState.invincible) {
+              if (hitPos) {
+                spawnExplosion(hitPos, 0xff8f8f, 18);
+              }
+              return;
+            }
+            shield = Math.max(0, shield - amount);
+            updateHud();
+            if (hitPos) {
+              spawnExplosion(hitPos, 0xff8f8f, 24);
+            }
+            if (shield <= 0) {
+              if (!isGameOver) {
+                isGameOver = true;
+                gameOverTimer = 2.8;
+              }
+              if (!playerDestroyed) {
+                playerDestroyed = true;
+                spawnPlayerDestruction();
+                player.visible = false;
+              }
+            }
+          }
+
+          // 日本語コメント: 当たり判定を簡易的に処理。
+          function handleCollisions() {
+            for (let i = bullets.length - 1; i >= 0; i--) {
+              const b = bullets[i];
+              for (let j = enemies.length - 1; j >= 0; j--) {
+                const e = enemies[j];
+                const dist = b.mesh.position.distanceTo(e.mesh.position);
+                if (dist < 2.1) {
+                  scene.remove(b.mesh);
+                  bullets.splice(i, 1);
+                  if (e.type === "monolith") {
+                    playMetalClangSound();
+                    spawnExplosion(b.mesh.position.clone(), 0xd7e2ff, 10);
+                  } else {
+                    scene.remove(e.mesh);
+                    enemies.splice(j, 1);
+                    score += 50;
+                    updateHud();
+                    spawnExplosion(e.mesh.position.clone(), 0x9ae6ff);
+                    playAirEnemyDestroySound();
+                  }
+                  break;
+                }
+              }
+            }
+            if (boss) {
+              for (let i = bullets.length - 1; i >= 0; i--) {
+                const b = bullets[i];
+                const distBoss = b.mesh.position.distanceTo(boss.mesh.position);
+                let removed = false;
+                if (distBoss < 6.2) {
+                  let handled = false;
+                  if (!boss.collapsing && boss.turrets) {
+                    for (const turret of boss.turrets) {
+                      if (turret.destroyed) continue;
+                      turret.mesh.getWorldPosition(tmpVec2);
+                      if (tmpVec2.distanceTo(b.mesh.position) < 1.4) {
+                        handleTurretDamage(turret, b.mesh.position.clone());
+                        handled = true;
+                        break;
+                      }
+                    }
+                  }
+                  if (
+                    !handled &&
+                    !boss.collapsing &&
+                    boss.core &&
+                    boss.core.mesh &&
+                    !boss.core.destroyed
+                  ) {
+                    boss.core.mesh.getWorldPosition(tmpVec2);
+                    if (tmpVec2.distanceTo(b.mesh.position) < 1.5) {
+                      handleCoreDamage(b.mesh.position.clone());
+                      handled = true;
+                    }
+                  }
+                  if (!handled) {
+                    spawnExplosion(b.mesh.position.clone(), 0xd7e2ff, 12);
+                  }
+                  removed = true;
+                } else if (boss.collapsing && distBoss < 5.2) {
+                  removed = true;
+                }
+                if (removed) {
+                  scene.remove(b.mesh);
+                  bullets.splice(i, 1);
+                }
+              }
+            }
+          }
+
+          // 日本語コメント: アニメーションループ内更新。
+          const clock = new THREE.Clock();
+          let enemyTimer = 0;
+          let groundTimer = 3.2;
+
+          function animate() {
+            const delta = clock.getDelta();
+            const speed = 8 * delta;
+
+            updateAreaBanner(delta);
+
+            if (!timelineLocked && !boss && !isGameOver) {
+              worldProgress += WORLD_SCROLL_SPEED * delta;
+              processMapEvents();
+            }
+
+            if (!isGameOver && !boss && bossSpawnTimer !== Infinity) {
+              bossSpawnTimer -= delta;
+                if (bossSpawnTimer <= 0) {
+                  const cfg = pendingBossConfig ? pendingBossConfig.config : {};
+                  const idx =
+                    pendingBossConfig && pendingBossConfig.areaIndex != null
+                      ? pendingBossConfig.areaIndex
+                      : currentAreaIndex;
+                  spawnFortressBoss(cfg, idx);
+                  pendingBossConfig = null;
+                  bossSpawnTimer = Infinity;
+                }
+            }
+            bossContactCooldown = Math.max(0, bossContactCooldown - delta);
+
+            // 日本語コメント: プレイヤー移動を制限範囲付きで更新。
+            if (!isGameOver && !titleActive) {
+              if (keys.ArrowLeft) player.position.x -= speed;
+              if (keys.ArrowRight) player.position.x += speed;
+              if (keys.ArrowUp) player.position.z -= speed;
+              if (keys.ArrowDown) player.position.z += speed;
+            }
+            player.position.x = Math.max(-6, Math.min(6, player.position.x));
+            player.position.z = Math.max(-2, Math.min(8, player.position.z));
+
+            // 日本語コメント: レティクルを自機前方に配置。
+            const reticleZ = Math.max(player.position.z - RETICLE_OFFSET_Z, RETICLE_MIN_Z);
+            reticle.position.set(player.position.x, -1.8, reticleZ);
+            reticle.visible = !isGameOver;
+
+            if (!isGameOver && boss) {
+              if (boss.collapsing) {
+                const collapse = boss.collapsing;
+                collapse.timer += delta;
+                const progress = THREE.MathUtils.clamp(
+                  collapse.timer / collapse.duration,
+                  0,
+                  1
+                );
+                boss.mesh.position.y -= (0.55 + progress * 0.9) * delta;
+                boss.mesh.position.z += 1.2 * delta;
+                boss.mesh.rotation.x += 0.22 * delta;
+                boss.mesh.rotation.z += collapse.rollDirection * 0.14 * delta;
+                collapse.nextSpark -= delta;
+                if (collapse.nextSpark <= 0) {
+                  collapse.nextSpark = 0.32 + Math.random() * 0.42;
+                  tmpVec.copy(boss.mesh.position);
+                  tmpVec.x += (Math.random() - 0.5) * 7.4;
+                  tmpVec.y += (Math.random() * 2 - 1.2);
+                  tmpVec.z += (Math.random() - 0.5) * 5.6;
+                  spawnExplosion(tmpVec.clone(), 0xffd6a0, 18);
+                }
+                if (collapse.timer >= collapse.duration) {
+                  finalizeBossCollapse();
+                }
+              } else {
+                boss.entryTimer -= delta;
+                if (boss.entryTimer > 0) {
+                  boss.mesh.position.z += 6 * delta;
+                  if (boss.mesh.position.z > -18) {
+                    boss.mesh.position.z = -18;
+                  }
+                } else {
+                  const desiredX = 0;
+                  const desiredZ = -13.5;
+                  boss.mesh.position.x +=
+                    (desiredX - boss.mesh.position.x) * delta * 1.2;
+                  boss.mesh.position.z +=
+                    (desiredZ - boss.mesh.position.z) * delta * 0.9;
+                }
+                boss.mesh.position.y =
+                  -1.2 + Math.sin(performance.now() * 0.002) * 0.15;
+
+                const activeTurrets = [];
+                if (boss.turrets) {
+                  for (const turret of boss.turrets) {
+                    if (turret.destroyed) continue;
+                    activeTurrets.push(turret);
+                    turret.cooldown = Math.max(0, turret.cooldown - delta);
+                    if (turret.mesh.material) {
+                      const readyGlow = turret.cooldown <= 0 ? 1 : 0.4;
+                      turret.mesh.material.opacity =
+                        0.55 +
+                        readyGlow *
+                          0.4 *
+                          Math.abs(Math.sin(performance.now() * 0.012));
+                    }
+                  }
+                }
+
+                if (boss.core && boss.core.mesh && boss.core.mesh.material && !boss.core.destroyed) {
+                  const coreMat = boss.core.mesh.material;
+                  const hasGuns = activeTurrets.length > 0;
+                  const pulse = hasGuns
+                    ? 0.46 + 0.22 * (1 + Math.sin(performance.now() * 0.01))
+                    : 0.82 + 0.14 * Math.sin(performance.now() * 0.01);
+                  coreMat.opacity = Math.min(1, pulse);
+                  coreMat.color.setHex(
+                    hasGuns ? boss.weakpointShieldColor : boss.weakpointActiveColor
+                  );
+                }
+
+                if (
+                  boss.weakpointMarker &&
+                  boss.weakpointMarker.material &&
+                  !boss.core.destroyed
+                ) {
+                  const hasGuns = activeTurrets.length > 0;
+                  const pulse = hasGuns
+                    ? 0.5 + 0.25 * Math.sin(performance.now() * 0.012)
+                    : 0.88 + 0.08 * Math.sin(performance.now() * 0.009);
+                  boss.weakpointMarker.material.opacity = Math.min(1, Math.abs(pulse));
+                  boss.weakpointMarker.material.color.setHex(
+                    hasGuns ? boss.weakpointShieldColor : boss.weakpointActiveColor
+                  );
+                }
+
+                boss.fireTimer -= delta;
+                if (boss.fireTimer <= 0) {
+                  if (activeTurrets.length > 0) {
+                    for (const turret of activeTurrets) {
+                      turret.mesh.getWorldPosition(tmpVec2);
+                      const origin = tmpVec2.clone();
+                      origin.y += 0.2;
+                      const target = player.position.clone();
+                      target.y += 0.2;
+                      spawnEnemyBullet(origin, target, 17);
+                      turret.cooldown = 0.25;
+                    }
+                  } else {
+                    const origin = boss.mesh.position.clone();
+                    origin.y += 0.6;
+                    const target = player.position.clone();
+                    target.y += 0.2;
+                    spawnEnemyBullet(origin, target, 18);
+                  }
+                  boss.fireTimer = 2.4 + Math.random() * 1.1;
+                }
+
+                const bossDist = boss.mesh.position.distanceTo(player.position);
+                if (bossDist < 3.2 && bossContactCooldown <= 0) {
+                  applyDamage(2, player.position.clone());
+                  bossContactCooldown = 1.4;
+                }
+              }
+            }
+
+            // 日本語コメント: 空中ショットと地上ボムのクールダウン。
+            if (!isGameOver) {
+              if (!titleActive) {
+                shootCooldown -= delta;
+                if (keys.Space && shootCooldown <= 0) {
+                  const fired = spawnBullet();
+                  if (fired) {
+                    shootCooldown = 0.26;
+                  }
+                }
+                bombCooldown -= delta;
+                if (keys.KeyZ && bombCooldown <= 0) {
+                  spawnBomb();
+                  bombCooldown = 0.75;
+                }
+              } else {
+                shootCooldown = Math.max(0, shootCooldown - delta);
+                bombCooldown = Math.max(0, bombCooldown - delta);
+              }
+            } else {
+              shootCooldown = Math.max(0, shootCooldown - delta);
+              bombCooldown = Math.max(0, bombCooldown - delta);
+            }
+            const reticleMaterial = reticle.material;
+            if (reticleMaterial) {
+              reticleMaterial.opacity = bombCooldown <= 0 ? 0.95 : 0.45;
+            }
+
+            // 日本語コメント: 弾更新とクリーンアップ。
+            for (let i = bullets.length - 1; i >= 0; i--) {
+              const bullet = bullets[i];
+              bullet.mesh.position.z += bullet.velocity * delta;
+              if (bullet.mesh.position.z < -120) {
+                scene.remove(bullet.mesh);
+                bullets.splice(i, 1);
+              }
+            }
+
+            // 日本語コメント: 爆弾を照準地点へ補間移動させ、着弾時に爆発を生成。
+            for (let i = bombs.length - 1; i >= 0; i--) {
+              const bomb = bombs[i];
+              bomb.elapsed += delta;
+              bomb.velocity.addScaledVector(bomb.gravity, delta);
+              bomb.mesh.position.addScaledVector(bomb.velocity, delta);
+              const speedSq = bomb.velocity.lengthSq();
+              if (speedSq > 0.0004) {
+                velocityHelper.copy(bomb.velocity).normalize();
+                tmpVec.copy(bomb.mesh.position).add(velocityHelper);
+                bomb.mesh.lookAt(tmpVec);
+              }
+              const reachedTime = bomb.elapsed >= bomb.flightTime;
+              const belowTarget =
+                bomb.mesh.position.y <= bomb.target.y && bomb.velocity.y <= 0;
+              const horizontalDelta = Math.hypot(
+                bomb.mesh.position.x - bomb.target.x,
+                bomb.mesh.position.z - bomb.target.z
+              );
+              if (reachedTime || (belowTarget && horizontalDelta < 2.2)) {
+                tmpVec.copy(bomb.mesh.position);
+                tmpVec.y = bomb.target.y;
+                spawnExplosion(tmpVec.clone(), 0xffc766, 32);
+                playExplosionSound();
+                for (let j = groundTargets.length - 1; j >= 0; j--) {
+                  const g = groundTargets[j];
+                  if (tmpVec.distanceTo(g.mesh.position) < 3.4) {
+                    scene.remove(g.mesh);
+                    groundTargets.splice(j, 1);
+                    score += 80;
+                    updateHud();
+                  }
+                }
+                if (boss && boss.core && !boss.core.destroyed) {
+                  const coreWorld = boss.mesh.localToWorld(
+                    boss.weakpointLocal.clone()
+                  );
+                  const impactDelta = tmpVec.clone().sub(coreWorld);
+                  const horizontal = Math.hypot(impactDelta.x, impactDelta.z);
+                  const vertical = Math.abs(impactDelta.y);
+                  if (horizontal < 1.8 && vertical < 1.6) {
+                    handleCoreDamage(coreWorld.clone());
+                  }
+                }
+                scene.remove(bomb.mesh);
+                bombs.splice(i, 1);
+              }
+            }
+
+            // 日本語コメント: 敵出現と前進処理。
+            if (!isGameOver && !timelineLocked) {
+              enemyTimer -= delta;
+              if (enemyTimer <= 0) {
+                spawnEnemy();
+                enemyTimer = getEnemySpawnDelay();
+              }
+            }
+            for (let i = enemies.length - 1; i >= 0; i--) {
+              const enemy = enemies[i];
+              const mesh = enemy.mesh;
+              let removeEnemy = false;
+              velocityHelper.set(0, 0, 0);
+              switch (enemy.type) {
+                case "A": {
+                  const dx = player.position.x - mesh.position.x;
+                  const adjust = THREE.MathUtils.clamp(
+                    dx,
+                    -enemy.alignSpeed * delta,
+                    enemy.alignSpeed * delta
+                  );
+                  if (enemy.state === "approach") {
+                    mesh.position.x += adjust;
+                    mesh.position.z += enemy.speed * delta;
+                    mesh.position.y =
+                      enemy.baseY +
+                      Math.sin(performance.now() * 0.004 + enemy.noisePhase) * 0.12;
+                    tmpVec.set(mesh.position.x, mesh.position.y, mesh.position.z + 1);
+                    mesh.lookAt(tmpVec);
+                    if (
+                      Math.abs(dx) < 0.6 &&
+                      mesh.position.z > player.position.z - 1.4
+                    ) {
+                      enemy.state = "escape";
+                      enemy.escapeVector = new THREE.Vector3(
+                        (Math.random() - 0.5) * 0.8,
+                        0.18 + Math.random() * 0.12,
+                        -1
+                      ).normalize();
+                      enemy.escapeSpeed = 24 + enemy.aggression * 4;
+                    }
+                    if (!isGameOver && mesh.position.z > 22) {
+                      applyDamage(1, player.position.clone());
+                      spawnExplosion(mesh.position.clone(), 0xff8f8f);
+                      removeEnemy = true;
+                    }
+                  } else {
+                    mesh.position.addScaledVector(
+                      enemy.escapeVector,
+                      enemy.escapeSpeed * delta
+                    );
+                    tmpVec.copy(mesh.position).add(enemy.escapeVector);
+                    mesh.lookAt(tmpVec);
+                    mesh.position.y += Math.sin(
+                      performance.now() * 0.006 + enemy.noisePhase
+                    ) * 0.04;
+                    if (mesh.position.z < MAP_VIEW_LIMITS.minZ - 8) {
+                      removeEnemy = true;
+                    }
+                  }
+                  break;
+                }
+                case "B": {
+                  if (enemy.state === "approach") {
+                    mesh.position.addScaledVector(
+                      enemy.direction,
+                      enemy.approachSpeed * delta
+                    );
+                    tmpVec.copy(mesh.position).add(enemy.direction);
+                    mesh.lookAt(tmpVec);
+                    if (mesh.position.z >= enemy.holdZ) {
+                      enemy.state = "hold";
+                      enemy.stateTimer = 0.55;
+                    }
+                  } else if (enemy.state === "hold") {
+                    enemy.stateTimer -= delta;
+                    if (enemy.stateTimer <= 0) {
+                      enemy.state = "retreat";
+                      if (!enemy.fired) {
+                        fireRetreatVolley(mesh.position.clone(), enemy.aggression);
+                        enemy.fired = true;
+                      }
+                    }
+                  } else if (enemy.state === "retreat") {
+                    mesh.position.addScaledVector(
+                      enemy.retreatVector,
+                      enemy.retreatSpeed * delta
+                    );
+                    tmpVec.copy(mesh.position).add(enemy.retreatVector);
+                    mesh.lookAt(tmpVec);
+                    mesh.position.y += Math.sin(performance.now() * 0.005) * 0.02;
+                    if (mesh.position.z < MAP_VIEW_LIMITS.minZ - 12) {
+                      removeEnemy = true;
+                    }
+                  }
+                  break;
+                }
+                case "C": {
+                  enemy.elapsed += delta;
+                  if (enemy.state === "dashIn") {
+                    mesh.position.addScaledVector(enemy.velocity, delta);
+                    const toPlayer = player.position.clone().sub(mesh.position);
+                    if (
+                      toPlayer.length() < 6 ||
+                      enemy.elapsed >= enemy.maxApproachTime
+                    ) {
+                      enemy.state = "scatter";
+                      enemy.scatterVector = new THREE.Vector3(
+                        (Math.random() - 0.5) * 1.8,
+                        0.3 + Math.random() * 0.3,
+                        -1
+                      ).normalize();
+                      fireDiscScatter(mesh.position.clone(), enemy.aggression);
+                    }
+                  } else if (enemy.state === "scatter") {
+                    mesh.position.addScaledVector(
+                      enemy.scatterVector,
+                      enemy.scatterSpeed * delta
+                    );
+                    enemy.scatterSpeed *= 0.995;
+                    if (mesh.position.z < MAP_VIEW_LIMITS.minZ - 16) {
+                      removeEnemy = true;
+                    }
+                  }
+                  if (enemy.state === "dashIn") {
+                    velocityHelper.copy(enemy.velocity).normalize();
+                  } else if (enemy.scatterVector) {
+                    velocityHelper.copy(enemy.scatterVector);
+                  }
+                  if (velocityHelper.lengthSq() > 0) {
+                    tmpVec.copy(mesh.position).add(velocityHelper);
+                    mesh.lookAt(tmpVec);
+                  }
+                  break;
+                }
+                case "monolith": {
+                  enemy.swayPhase += enemy.swaySpeed * delta;
+                  mesh.position.z += enemy.forwardSpeed * delta;
+                  mesh.position.x =
+                    enemy.baseX + Math.sin(enemy.swayPhase) * enemy.swayAmplitude;
+                  mesh.position.y = 1.2 + Math.cos(enemy.swayPhase * 1.1) * 0.6;
+                  mesh.rotation.y += enemy.rotationSpeed * delta;
+                  if (mesh.position.z > 20 || mesh.position.z < MAP_VIEW_LIMITS.minZ - 24) {
+                    removeEnemy = true;
+                  }
+                  break;
+                }
+                default: {
+                  mesh.position.z += (enemy.velocity || 14) * delta;
+                  if (mesh.position.z > 22) {
+                    applyDamage(1, player.position.clone());
+                    spawnExplosion(mesh.position.clone(), 0xff8f8f);
+                    removeEnemy = true;
+                  }
+                  break;
+                }
+              }
+
+              if (!removeEnemy) {
+                const distToPlayer = mesh.position.distanceTo(player.position);
+                if (distToPlayer < 1.4 && !debugState.invincible) {
+                  applyDamage(1, player.position.clone());
+                  spawnExplosion(mesh.position.clone(), 0xff8f8f);
+                  removeEnemy = true;
+                }
+              }
+              if (
+                !removeEnemy &&
+                (mesh.position.z < MAP_VIEW_LIMITS.minZ - 24 ||
+                  mesh.position.z > MAP_VIEW_LIMITS.maxZ + 8 ||
+                  Math.abs(mesh.position.x) > 60 ||
+                  Math.abs(mesh.position.y) > 40)
+              ) {
+                removeEnemy = true;
+              }
+
+              if (removeEnemy) {
+                scene.remove(mesh);
+                enemies.splice(i, 1);
+              }
+            }
+
+            // 日本語コメント: 地上物の生成と進行管理。
+            if (!isGameOver && !timelineLocked) {
+              groundTimer -= delta;
+              if (groundTimer <= 0) {
+                spawnGroundTarget();
+                groundTimer = 3.4 + Math.random() * 2.4;
+              }
+            }
+            for (let i = groundTargets.length - 1; i >= 0; i--) {
+              const ground = groundTargets[i];
+              if (ground.hover) {
+                ground.mesh.position.x =
+                  ground.hoverBaseX + ground.hoverDir * ground.hoverSpeed * delta;
+                if (Math.abs(ground.mesh.position.x) > 8) {
+                  ground.hoverDir *= -1;
+                  ground.mesh.position.x = THREE.MathUtils.clamp(
+                    ground.mesh.position.x,
+                    -8,
+                    8
+                  );
+                }
+              }
+              ground.mesh.position.z += ground.velocity * delta;
+              if (ground.mesh.position.z > 12) {
+                scene.remove(ground.mesh);
+                groundTargets.splice(i, 1);
+              }
+            }
+            for (let i = decorations.length - 1; i >= 0; i--) {
+              const deco = decorations[i];
+              deco.mesh.position.z += deco.velocity * delta;
+              if (deco.mesh.position.z > deco.cleanupZ) {
+                scene.remove(deco.mesh);
+                decorations.splice(i, 1);
+              }
+            }
+
+            // 日本語コメント: 敵弾の移動とプレイヤー被弾判定。
+            for (let i = enemyBullets.length - 1; i >= 0; i--) {
+              const bullet = enemyBullets[i];
+              bullet.mesh.position.addScaledVector(bullet.velocity, delta);
+              const hitDist = bullet.mesh.position.distanceTo(player.position);
+              if (hitDist < 1.2) {
+                applyDamage(1, player.position.clone());
+                spawnExplosion(bullet.mesh.position.clone(), 0xffa8c7, 16);
+                scene.remove(bullet.mesh);
+                enemyBullets.splice(i, 1);
+                continue;
+              }
+              if (bullet.mesh.position.length() > 160 || bullet.mesh.position.z > 30) {
+                scene.remove(bullet.mesh);
+                enemyBullets.splice(i, 1);
+              }
+            }
+
+            // 日本語コメント: 爆発パーティクルの更新。
+            for (let i = explosions.length - 1; i >= 0; i--) {
+              const exp = explosions[i];
+              const positions = exp.points.geometry.attributes.position;
+              for (let j = 0; j < positions.count; j++) {
+                positions.array[j * 3] += exp.velocities[j * 3] * delta * 20;
+                positions.array[j * 3 + 1] += exp.velocities[j * 3 + 1] * delta * 20;
+                positions.array[j * 3 + 2] += exp.velocities[j * 3 + 2] * delta * 20;
+              }
+              positions.needsUpdate = true;
+              exp.life -= delta;
+              const opacity = Math.max(0, exp.life / exp.maxLife);
+              exp.points.material.opacity = opacity;
+              if (exp.life <= 0) {
+                scene.remove(exp.points);
+                explosions.splice(i, 1);
+              }
+            }
+
+            // 日本語コメント: 衝撃波ラインを拡散させる。
+            for (let i = shockwaves.length - 1; i >= 0; i--) {
+              const wave = shockwaves[i];
+              wave.life -= delta;
+              const lifeRatio = Math.max(0, wave.life / wave.maxLife);
+              const growth = 1 + (1 - lifeRatio) * 6;
+              wave.mesh.scale.set(growth, growth, growth);
+              wave.mesh.material.opacity = 0.85 * lifeRatio;
+              if (wave.life <= 0) {
+                scene.remove(wave.mesh);
+                shockwaves.splice(i, 1);
+              }
+            }
+
+            // 日本語コメント: 地面と遠景のスクロール演出。
+            grid.position.z += 12 * delta;
+            if (grid.position.z > 4) grid.position.z = -4;
+            horizon.position.z += 22 * delta;
+            if (horizon.position.z > -20) horizon.position.z = -60;
+
+            handleCollisions();
+
+            if (isGameOver && gameOverTimer !== null) {
+              gameOverTimer -= delta;
+              if (gameOverTimer <= 0) {
+                gameOverTimer = null;
+                gameOverOverlay.style.display = "block";
+              }
+            }
+
+            renderer.render(scene, camera);
+            requestAnimationFrame(animate);
+          }
+
+          updateHud();
+          animate();
+
+          window.addEventListener("resize", () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            drawTitleLogo();
+          });
+        } catch (err) {
+          console.error(err);
+          const fallback = document.createElement("pre");
+          fallback.style.position = "fixed";
+          fallback.style.top = "50%";
+          fallback.style.left = "50%";
+          fallback.style.transform = "translate(-50%, -50%)";
+          fallback.style.color = "#ff4d4f";
+          fallback.style.fontSize = "16px";
+          fallback.style.background = "#110000cc";
+          fallback.style.padding = "24px";
+          fallback.style.border = "1px solid #ff4d4f";
+          fallback.textContent =
+            "WebGL初期化に失敗しました。Three.jsの読み込み環境を確認してください。";
+          document.body.appendChild(fallback);
+        }
+      }
+
+      start();
+    </script>
+  </body>
+</html>
