@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<title>Game QR Code</title>
+<title>Zovious QR Minigame</title>
 <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
 <style>
   :root { color-scheme: dark; }
@@ -30,38 +30,28 @@
 </style>
 </head>
 <body>
-<h1>Zovious Wireframe Shooter</h1>
-<p>以下のQRコードを読み込むと、HTMLファイルとしてゲームが起動します。</p>
+<h1>Zovious Wireframe Shooter (Mini)</h1>
+<p>以下のQRコードを読み込むと、QRコード自体に埋め込まれた超軽量版ボス戦ゲームが起動します。<br>※フルバージョンのゲームは容量オーバーのためQR単体に収めることは物理的に不可能です。このQRは約2.9KBの2D軽量版を含んでいます。</p>
 
 <div class="qr-box" id="qr-container">
   <canvas id="qr-canvas"></canvas>
 </div>
 
 <script>
-  let gameUrl = window.location.href.replace('qr.html', 'index.html');
-  if (!gameUrl.endsWith('index.html')) {
-      const url = new URL(gameUrl);
-      const pathParts = url.pathname.split('/');
-      pathParts[pathParts.length - 1] = 'index.html';
-      url.pathname = pathParts.join('/');
-      gameUrl = url.href;
-  }
+  // A super-minimal 2D version of the boss battle to fit in a data URI.
+  const minigameHtml = "<!DOCTYPE html><html style='background:#000;color:#0ff;font-family:monospace;overflow:hidden;touch-action:none'><head><meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=0'></head><body><canvas id='c' style='width:100vw;height:100vh;display:block'></canvas><script>let w=innerWidth,h=innerHeight,ctx=c.getContext('2d'),p={x:w/2,y:h*.8,hp:3,c:0},b=[],e=[],f=0,sc=0;c.width=w;c.height=h;let bs={x:w/2,y:h*.2,hp:100,t:0,mx:2};let kL=0,kR=0,kS=0;onkeydown=k=>{if(k.key=='ArrowLeft')kL=1;if(k.key=='ArrowRight')kR=1;if(k.key==' ')kS=1;};onkeyup=k=>{if(k.key=='ArrowLeft')kL=0;if(k.key=='ArrowRight')kR=0;if(k.key==' ')kS=0;};c.ontouchstart=e=>{let tx=e.touches[0].clientX;if(tx<w/2){kL=1;kR=0;}else{kR=1;kL=0;}kS=1;};c.ontouchend=e=>{kL=kR=kS=0;};setInterval(()=>{ctx.fillStyle='#000';ctx.fillRect(0,0,w,h);if(p.hp<=0)return ctx.fillText('GAME OVER',w/2-30,h/2);if(bs.hp<=0)return ctx.fillText('CLEAR! SC:'+sc,w/2-40,h/2);ctx.strokeStyle='#0ff';f++;p.c--;if(kL)p.x-=10;if(kR)p.x+=10;if(kS&&p.c<=0){b.push({x:p.x,y:p.y-10,v:-15});p.c=10;}ctx.beginPath();ctx.moveTo(p.x,p.y-10);ctx.lineTo(p.x-15,p.y+10);ctx.lineTo(p.x+15,p.y+10);ctx.closePath();ctx.stroke();ctx.font='16px monospace';ctx.fillStyle='#0ff';ctx.fillText('HP:'+p.hp+' SC:'+sc+' BOSS:'+bs.hp,10,30);bs.x+=Math.sin(f*.02)*2;ctx.strokeStyle='#f80';ctx.strokeRect(bs.x-40,bs.y-20,80,40);ctx.strokeRect(bs.x-10,bs.y-10,20,20);if(f%40==0)e.push({x:bs.x,y:bs.y+20,v:6});if(f%70==0){e.push({x:bs.x-30,y:bs.y+20,v:5});e.push({x:bs.x+30,y:bs.y+20,v:5});}for(let i=b.length-1;i>=0;i--){b[i].y+=b[i].v;ctx.fillStyle='#fff';ctx.fillRect(b[i].x-2,b[i].y-5,4,10);if(b[i].y<bs.y+20&&Math.abs(b[i].x-bs.x)<40){bs.hp--;sc+=10;b.splice(i,1);}else if(b[i].y<0)b.splice(i,1);}for(let i=e.length-1;i>=0;i--){e[i].y+=e[i].v;ctx.fillStyle='#f00';ctx.fillRect(e[i].x-3,e[i].y-3,6,6);if(Math.abs(e[i].x-p.x)<15&&Math.abs(e[i].y-p.y)<15){p.hp--;e.splice(i,1);}else if(e[i].y>h)e.splice(i,1);}},30);<" + "/script></body></html>";
 
-  // If the protocol is file://, iOS Safari and Chrome might not handle the generated QR correctly,
-  // because "file://" URLs can't be navigated to from QR codes easily.
-  // We'll warn the user if it's file://
-  if (window.location.protocol === 'file:') {
-    const warning = document.createElement('div');
-    warning.style.color = 'red';
-    warning.style.marginTop = '20px';
-    warning.textContent = '警告: 現在ローカルのファイル(file://)から開かれています。生成されたQRコードはスマホ等で読み取っても正しく動作しない可能性があります。Webサーバー経由(http://~)でこのページを開いてください。';
-    document.body.appendChild(warning);
-  }
+  // We optimize the data URI length by encoding it. QR codes max capacity is 2953 bytes.
+  // We use errorCorrectionLevel L for maximum capacity.
+  // We also try to use base64 encoding instead of URI encoding because base64 is slightly shorter
+  const encodedHtml = btoa(minigameHtml);
+  const dataUri = "data:text/html;base64," + encodedHtml;
 
   const canvas = document.getElementById('qr-canvas');
-  QRCode.toCanvas(canvas, gameUrl, {
-    width: 300,
-    margin: 2,
+  QRCode.toCanvas(canvas, dataUri, {
+    errorCorrectionLevel: 'L',
+    margin: 4,
+    width: 350,
     color: {
       dark: '#000000',
       light: '#ffffff'
@@ -69,7 +59,10 @@
   }, function (error) {
     if (error) {
       console.error(error);
-      alert("QRコードの生成に失敗しました: " + error);
+      const errBox = document.createElement('div');
+      errBox.style.color = 'red';
+      errBox.textContent = "QRコードの生成に失敗しました: " + error.message;
+      document.getElementById('qr-container').appendChild(errBox);
     }
   });
 </script>
