@@ -38,8 +38,6 @@
 </div>
 
 <script>
-  // ゲームの絶対URLを取得
-  // qr.html と同じディレクトリにある index.html を指す
   let gameUrl = window.location.href.replace('qr.html', 'index.html');
   if (!gameUrl.endsWith('index.html')) {
       const url = new URL(gameUrl);
@@ -47,6 +45,17 @@
       pathParts[pathParts.length - 1] = 'index.html';
       url.pathname = pathParts.join('/');
       gameUrl = url.href;
+  }
+
+  // If the protocol is file://, iOS Safari and Chrome might not handle the generated QR correctly,
+  // because "file://" URLs can't be navigated to from QR codes easily.
+  // We'll warn the user if it's file://
+  if (window.location.protocol === 'file:') {
+    const warning = document.createElement('div');
+    warning.style.color = 'red';
+    warning.style.marginTop = '20px';
+    warning.textContent = '警告: 現在ローカルのファイル(file://)から開かれています。生成されたQRコードはスマホ等で読み取っても正しく動作しない可能性があります。Webサーバー経由(http://~)でこのページを開いてください。';
+    document.body.appendChild(warning);
   }
 
   const canvas = document.getElementById('qr-canvas');
