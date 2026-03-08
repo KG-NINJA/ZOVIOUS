@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Game QR Code</title>
+<script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    background: #000;
+    color: #d4f6ff;
+    font-family: "IBM Plex Mono", monospace;
+    padding: 20px;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  h1 { text-align: center; color: #66b3ff; font-size: 24px; margin-bottom: 10px; }
+  p { text-align: center; font-size: 14px; opacity: 0.8; margin-bottom: 30px; }
+  .qr-box {
+    background: #fff;
+    padding: 20px;
+    border-radius: 12px;
+    box-shadow: 0 0 20px rgba(102, 179, 255, 0.4);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
+</style>
+</head>
+<body>
+<h1>Zovious Wireframe Shooter</h1>
+<p>以下のQRコードを読み込むと、HTMLファイルとしてゲームが起動します。</p>
+
+<div class="qr-box" id="qr-container">
+  <canvas id="qr-canvas"></canvas>
+</div>
+
+<script>
+  // ゲームの絶対URLを取得
+  // qr.html と同じディレクトリにある index.html を指す
+  let gameUrl = window.location.href.replace('qr.html', 'index.html');
+  if (!gameUrl.endsWith('index.html')) {
+      const url = new URL(gameUrl);
+      const pathParts = url.pathname.split('/');
+      pathParts[pathParts.length - 1] = 'index.html';
+      url.pathname = pathParts.join('/');
+      gameUrl = url.href;
+  }
+
+  const canvas = document.getElementById('qr-canvas');
+  QRCode.toCanvas(canvas, gameUrl, {
+    width: 300,
+    margin: 2,
+    color: {
+      dark: '#000000',
+      light: '#ffffff'
+    }
+  }, function (error) {
+    if (error) {
+      console.error(error);
+      alert("QRコードの生成に失敗しました: " + error);
+    }
+  });
+</script>
+</body>
+</html>
